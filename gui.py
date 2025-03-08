@@ -187,50 +187,53 @@ def retrieve_models():
             messagebox.showinfo("Info", "No models found for the selected API key.")
             return
         # Set dropdown values for all three prompt types with defaults:
-        section_model_dropdown['values'] = available_models
-        section_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
-        
-        answer_model_dropdown['values'] = available_models
-        answer_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        content_model_dropdown['values'] = available_models
+        content_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
         
         clue_model_dropdown['values'] = available_models
         clue_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
         
         # Update model info labels explicitly on initialization.
-        update_model_info('section')
-        update_model_info('answer')
+        update_model_info('content')
         update_model_info('clue')
 
         # Optionally adjust widths
         max_width = max(len(model) for model in available_models) + 2
-        for dd in (section_model_dropdown, answer_model_dropdown, clue_model_dropdown):
+        for dd in (content_model_dropdown, clue_model_dropdown):
             dd.config(width=max(20, max_width))
+        
+        # Store model_info
+        model_info = {
+            'content': content_model_dropdown,
+            'clue': clue_model_dropdown
+        }
+        
+        return True
     except Exception as e:
         traceback.print_exc()
         messagebox.showerror("Error", f"Failed to retrieve models: {e}")
+        return False
 
 def update_model_info(model_type, *args):
     """
     Updates the model information display for the given model type.
     
     Args:
-        model_type (str): The type of model ('section', 'answer', or 'clue')
+        model_type (str): The type of model ('content', 'clue')
         *args: Additional arguments passed by trace_add
     """
-    model_vars = {
-        'section': section_model_dropdown,
-        'answer': answer_model_dropdown,
+    dropdown_map = {
+        'content': content_model_dropdown,
         'clue': clue_model_dropdown
     }
     
-    info_labels = {
-        'section': section_model_info_label,
-        'answer': answer_model_info_label,
+    label_map = {
+        'content': content_model_info_label,
         'clue': clue_model_info_label
     }
     
-    dropdown = model_vars.get(model_type)
-    info_label = info_labels.get(model_type)
+    dropdown = dropdown_map.get(model_type)
+    info_label = label_map.get(model_type)
     
     if not dropdown or not info_label:
         print(f"[ERROR] Invalid model type: {model_type}")
@@ -255,6 +258,7 @@ def update_model_info(model_type, *args):
         info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
 
 def load_model_info():
+    """Load model information after API key is selected."""
     global MODEL_INFO
     json_directory = os.path.dirname(selected_api_key_path) if selected_api_key_path else os.getcwd()
     json_file = os.path.join(json_directory, "model_info.json")
@@ -266,6 +270,10 @@ def load_model_info():
         with open(json_file, "r", encoding="utf-8") as f:
             MODEL_INFO = json.load(f)
         print(f"[DEBUG] Loaded model_info.json from {json_file}.")
+        
+        # Trigger the model info update for all dropdowns
+        update_model_info('content')
+        update_model_info('clue')
     except Exception as e:
         traceback.print_exc()
         MODEL_INFO = {}
@@ -378,48 +386,29 @@ def create_tab(page_index, api_response, pdf_text):
 # ------------------------ HELPER FUNCTION: VALIDATE ANSWERS ------------------------
 def validate_and_replace_answers(page_index, answers):
     """
-    Validates each answer so that it is 25 characters or fewer (including spaces).
-    If an answer exceeds 25 characters, this function prompts the API (up to 3 attempts)
-    to generate a replacement that meets the criteria.
-    Returns a list of validated answers.
+    Validates answers against criteria and replaces them if needed.
+    Criteria: A-Z, 0-9, spaces only, max 25 chars.
     """
     valid_answers = []
-    pdf_text = pdf_pages[page_index]
-
-    for ans in answers:
-        if len(ans) <= 25:
-            valid_answers.append(ans)
+    for answer in answers:
+        # Keep for answer validation: alphanumeric + spaces only
+        prompt = (
+            f"Answer: {answer}\n\n"
+            "Rules for valid answers:\n"
+            "1. Only uppercase letters (A-Z), numbers (0-9), and spaces allowed\n"
+            "2. No special characters\n"
+            "3. Maximum 25 characters\n"
+            "4. Must be a coherent term or phrase\n\n"
+            "Provide a valid answer that is as close as possible to the original, "
+            "following all rules. If the original requires minimal or no changes, keep it as is.\n"
+            "Respond with the valid answer only, no explanation."
+        )
+        
+        api_result = send_prompt(prompt, content_model_dropdown, max_tokens=100)
+        if api_result:
+            valid_answers.append(api_result.strip().upper())
         else:
-            attempts = 0
-            new_answer = None
-            while attempts < 3:
-                prompt = (
-                    f"PDF Content:\n{pdf_text}\n\n"
-                    f"The previously generated answer '{ans}' is longer than 25 characters. "
-                    "Please generate a new, unique answer keyword/phrase that meets these criteria:\n"
-                    "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
-                    "- May include spaces.\n"
-                    "- No special characters, dashes, or punctuation.\n"
-                    "- 25 characters or fewer.\n"
-                    "- Directly sourced from the document.\n"
-                    "Output only the answer."
-                )
-                
-                # Use smaller max_tokens for answer generation
-                api_result = send_prompt(prompt, answer_model_dropdown, max_tokens=100)
-                if api_result:
-                    new_answer = api_result.strip().upper()
-                    if len(new_answer) <= 25 and new_answer not in valid_answers:
-                        valid_answers.append(new_answer)
-                        break
-                    else:
-                        attempts += 1
-                else:
-                    print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}")
-                    attempts += 1
-                    
-            if new_answer is None or len(new_answer) > 25:
-                print(f"[DEBUG] Unable to generate a valid answer for '{ans}' on page {page_index+1} after {attempts} attempts.")
+            print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}")
     return valid_answers
 
 # ------------------------ API PROMPT HANDLING ------------------------
@@ -472,7 +461,7 @@ def process_page_metadata(page_index, page_text):
         "ANSWER1, ANSWER2, ANSWER3, ..."
     )
     
-    api_result = send_prompt(prompt, section_model_dropdown)
+    api_result = send_prompt(prompt, content_model_dropdown)
     if api_result:
         lines = api_result.strip().split('\n')
         if len(lines) >= 2:
@@ -559,7 +548,7 @@ def resubmit_tab(page_index):
             )
             print(f"[DEBUG] Resubmit: Sending prompt for new answer keywords for page {page_index+1}:\n{prompt}")
             
-            api_result = send_prompt(prompt, answer_model_dropdown)
+            api_result = send_prompt(prompt, content_model_dropdown)
             if api_result:
                 new_answers = validate_and_replace_answers(
                     page_index,
@@ -583,6 +572,9 @@ def resubmit_all_tabs():
 
 # ------------------------ DROPDOWN ARROW KEY HANDLING ------------------------
 def on_arrow_key_dropdown(event, dropdown):
+    """
+    Handles arrow key navigation in dropdowns.
+    """
     values = dropdown['values']
     if not values:
         return "break"
@@ -599,10 +591,8 @@ def on_arrow_key_dropdown(event, dropdown):
         return
     dropdown.set(values[new_index])
     # Manually update the corresponding model info label
-    if dropdown == section_model_dropdown:
-        update_model_info('section')
-    elif dropdown == answer_model_dropdown:
-        update_model_info('answer')
+    if dropdown == content_model_dropdown:
+        update_model_info('content')
     elif dropdown == clue_model_dropdown:
         update_model_info('clue')
     return "break"
@@ -689,33 +679,20 @@ pdf_filename_label.pack(side=tk.LEFT, padx=5)
 model_prompt_frame = tk.Frame(root, bg="#2e2e2e")
 model_prompt_frame.pack(pady=5, padx=10, fill=tk.X)
 
-# Section Model Dropdown
-section_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
-section_frame.pack(side=tk.LEFT, padx=5)
-tk.Label(section_frame, text="Section Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
-section_model_var = tk.StringVar()
-section_model_dropdown = ttk.Combobox(section_frame, textvariable=section_model_var, state="readonly")
-section_model_dropdown.pack(anchor="w")
-section_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, section_model_dropdown))
-section_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, section_model_dropdown))
-section_model_info_label = tk.Label(section_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
-section_model_info_label.pack(anchor="w")
-section_model_var.trace_add("write", lambda *args: update_model_info('section'))
+# Content Model Dropdown (replaces section and answer model dropdowns)
+content_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
+content_frame.pack(side=tk.LEFT, padx=5)
+tk.Label(content_frame, text="Content Analysis Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
+content_model_var = tk.StringVar()
+content_model_dropdown = ttk.Combobox(content_frame, textvariable=content_model_var, state="readonly")
+content_model_dropdown.pack(anchor="w")
+content_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, content_model_dropdown))
+content_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, content_model_dropdown))
+content_model_info_label = tk.Label(content_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
+content_model_info_label.pack(anchor="w")
+content_model_var.trace_add("write", lambda *args: update_model_info('content'))
 
-# Answer Model Dropdown
-answer_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
-answer_frame.pack(side=tk.LEFT, padx=5)
-tk.Label(answer_frame, text="Answer Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
-answer_model_var = tk.StringVar()
-answer_model_dropdown = ttk.Combobox(answer_frame, textvariable=answer_model_var, state="readonly")
-answer_model_dropdown.pack(anchor="w")
-answer_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, answer_model_dropdown))
-answer_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, answer_model_dropdown))
-answer_model_info_label = tk.Label(answer_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
-answer_model_info_label.pack(anchor="w")
-answer_model_var.trace_add("write", lambda *args: update_model_info('answer'))
-
-# Clue Model Dropdown
+# Clue Model Dropdown (keep this as is)
 clue_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
 clue_frame.pack(side=tk.LEFT, padx=5)
 tk.Label(clue_frame, text="Clue Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
