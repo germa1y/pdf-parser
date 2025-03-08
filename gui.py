@@ -197,9 +197,9 @@ def retrieve_models():
         clue_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
         
         # Update model info labels explicitly on initialization.
-        update_section_model_info()
-        update_answer_model_info()
-        update_clue_model_info()
+        update_model_info('section')
+        update_model_info('answer')
+        update_model_info('clue')
 
         # Optionally adjust widths
         max_width = max(len(model) for model in available_models) + 2
@@ -209,9 +209,36 @@ def retrieve_models():
         traceback.print_exc()
         messagebox.showerror("Error", f"Failed to retrieve models: {e}")
 
-def update_section_model_info(*args):
-    selected_model = section_model_dropdown.get().strip()
-    print("Section model selected:", selected_model)
+def update_model_info(model_type, *args):
+    """
+    Updates the model information display for the given model type.
+    
+    Args:
+        model_type (str): The type of model ('section', 'answer', or 'clue')
+        *args: Additional arguments passed by trace_add
+    """
+    model_vars = {
+        'section': section_model_dropdown,
+        'answer': answer_model_dropdown,
+        'clue': clue_model_dropdown
+    }
+    
+    info_labels = {
+        'section': section_model_info_label,
+        'answer': answer_model_info_label,
+        'clue': clue_model_info_label
+    }
+    
+    dropdown = model_vars.get(model_type)
+    info_label = info_labels.get(model_type)
+    
+    if not dropdown or not info_label:
+        print(f"[ERROR] Invalid model type: {model_type}")
+        return
+        
+    selected_model = dropdown.get().strip()
+    print(f"{model_type.capitalize()} model selected:", selected_model)
+    
     if selected_model in MODEL_INFO:
         details = MODEL_INFO[selected_model]
         input_price = details.get("input_price", "N/A")
@@ -219,46 +246,13 @@ def update_section_model_info(*args):
         context_size = details.get("context_size", "N/A")
         is_new = details.get("new_model", False)
         model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
+        
         if is_new:
-            section_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
+            info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
         else:
-            section_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
+            info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
     else:
-        section_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
-
-def update_answer_model_info(*args):
-    selected_model = answer_model_dropdown.get().strip()
-    print("Answer model selected:", selected_model)
-    if selected_model in MODEL_INFO:
-        details = MODEL_INFO[selected_model]
-        input_price = details.get("input_price", "N/A")
-        output_price = details.get("output_price", "N/A")
-        context_size = details.get("context_size", "N/A")
-        is_new = details.get("new_model", False)
-        model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
-        if is_new:
-            answer_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
-        else:
-            answer_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
-    else:
-        answer_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
-
-def update_clue_model_info(*args):
-    selected_model = clue_model_dropdown.get().strip()
-    print("Clue model selected:", selected_model)
-    if selected_model in MODEL_INFO:
-        details = MODEL_INFO[selected_model]
-        input_price = details.get("input_price", "N/A")
-        output_price = details.get("output_price", "N/A")
-        context_size = details.get("context_size", "N/A")
-        is_new = details.get("new_model", False)
-        model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
-        if is_new:
-            clue_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
-        else:
-            clue_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
-    else:
-        clue_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
+        info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
 
 def load_model_info():
     global MODEL_INFO
@@ -277,51 +271,78 @@ def load_model_info():
         MODEL_INFO = {}
 
 # ------------------------ PDF HANDLING ------------------------
-def browse_pdf():
+def load_pdf(pdf_path=None, use_dialog=True):
+    """
+    Load a PDF file either from a provided path or using a file dialog.
+    
+    Args:
+        pdf_path (str, optional): Path to the PDF file to load. If None and use_dialog is True, 
+                                  opens a file dialog. Defaults to None.
+        use_dialog (bool, optional): Whether to use a file dialog if pdf_path is None. Defaults to True.
+    
+    Returns:
+        bool: True if PDF was successfully loaded, False otherwise.
+    """
     global pdf_pages
-    pdf_path = filedialog.askopenfilename(
-        title="Select PDF File",
-        filetypes=[("PDF Files", "*.pdf")],
-        initialdir=os.getcwd()
-    )
+    
+    # If no path provided and dialog requested, use the file dialog
+    if pdf_path is None and use_dialog:
+        pdf_path = filedialog.askopenfilename(
+            title="Select PDF File",
+            filetypes=[("PDF Files", "*.pdf")],
+            initialdir=os.getcwd()
+        )
+    
+    # If still no path (user cancelled dialog or no path provided), return
     if not pdf_path:
         pdf_filename_label.config(text="No PDF selected")
-        return
+        return False
+    
+    # Validate PDF extension
     if not pdf_path.lower().endswith(".pdf"):
-        messagebox.showerror("Invalid File", "Please select a valid PDF file.")
+        msg = "Please select a valid PDF file."
+        if use_dialog:
+            messagebox.showerror("Invalid File", msg)
+        else:
+            print(f"[ERROR] {msg}")
         pdf_filename_label.config(text="No PDF selected")
-        return
+        return False
+    
+    # Check if file exists (important for non-dialog modes)
+    if not os.path.exists(pdf_path):
+        msg = f"PDF file not found: {pdf_path}"
+        if use_dialog:
+            messagebox.showerror("File Not Found", msg)
+        else:
+            print(f"[ERROR] {msg}")
+        pdf_filename_label.config(text="No PDF selected")
+        return False
+    
+    # Try to process the PDF
     try:
         reader = PdfReader(pdf_path)
         pdf_pages = [page.extract_text() if page.extract_text() else "Empty Page" for page in reader.pages]
         filename = os.path.basename(pdf_path)
         pdf_filename_label.config(text=filename)
         print(f"[DEBUG] PDF loaded with {len(pdf_pages)} pages.")
-    except Exception as e:
-        traceback.print_exc()
-        messagebox.showerror("Error", f"Failed to process PDF: {e}")
-        pdf_filename_label.config(text="No PDF selected")
-
-def preload_pdf(pdf_path):
-    """Load a PDF file programmatically without using the file dialog."""
-    global pdf_pages
-    if not os.path.exists(pdf_path):
-        print(f"[ERROR] PDF file not found: {pdf_path}")
-        return False
-    if not pdf_path.lower().endswith(".pdf"):
-        print("[ERROR] Not a valid PDF file.")
-        return False
-    try:
-        reader = PdfReader(pdf_path)
-        pdf_pages = [page.extract_text() if page.extract_text() else "Empty Page" for page in reader.pages]
-        filename = os.path.basename(pdf_path)
-        pdf_filename_label.config(text=filename)
-        print(f"[DEBUG] PDF preloaded with {len(pdf_pages)} pages.")
         return True
     except Exception as e:
         traceback.print_exc()
-        print(f"[ERROR] Failed to process PDF: {e}")
+        msg = f"Failed to process PDF: {e}"
+        if use_dialog:
+            messagebox.showerror("Error", msg)
+        else:
+            print(f"[ERROR] {msg}")
+        pdf_filename_label.config(text="No PDF selected")
         return False
+
+def browse_pdf():
+    """Opens a file dialog to select and load a PDF file."""
+    return load_pdf(use_dialog=True)
+
+def preload_pdf(pdf_path):
+    """Load a PDF file programmatically without using the file dialog."""
+    return load_pdf(pdf_path, use_dialog=False)
 
 # ------------------------ RESPONSE DISPLAY HANDLING ------------------------
 def clear_output_display():
@@ -369,7 +390,6 @@ def validate_and_replace_answers(page_index, answers):
     Returns a list of validated answers.
     """
     valid_answers = []
-    selected_model = answer_model_dropdown.get()
     pdf_text = pdf_pages[page_index]
 
     for ans in answers:
@@ -379,7 +399,6 @@ def validate_and_replace_answers(page_index, answers):
             attempts = 0
             new_answer = None
             while attempts < 3:
-                print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
                 prompt = (
                     f"PDF Content:\n{pdf_text}\n\n"
                     f"The previously generated answer '{ans}' is longer than 25 characters. "
@@ -391,22 +410,53 @@ def validate_and_replace_answers(page_index, answers):
                     "- Directly sourced from the document.\n"
                     "Output only the answer."
                 )
-                try:
-                    messages = [{"role": "user", "content": prompt}]
-                    params = {"model": selected_model, "messages": messages, "max_completion_tokens": 100, "stream": False}
-                    response = client.chat.completions.create(**params)
-                    new_answer = response.choices[0].message.content.strip().upper()
+                
+                # Use smaller max_tokens for answer generation
+                api_result = send_prompt(prompt, answer_model_dropdown, max_tokens=100)
+                if api_result:
+                    new_answer = api_result.strip().upper()
                     if len(new_answer) <= 25 and new_answer not in valid_answers:
                         valid_answers.append(new_answer)
                         break
                     else:
                         attempts += 1
-                except Exception as e:
-                    print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}: {e}")
+                else:
+                    print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}")
                     attempts += 1
+                    
             if new_answer is None or len(new_answer) > 25:
                 print(f"[DEBUG] Unable to generate a valid answer for '{ans}' on page {page_index+1} after {attempts} attempts.")
     return valid_answers
+
+# ------------------------ API PROMPT HANDLING ------------------------
+def send_prompt(prompt, model_dropdown, max_tokens=4096):
+    """
+    Send a prompt to the OpenAI API using the specified model dropdown.
+    
+    Args:
+        prompt (str): The prompt to send to the API
+        model_dropdown (ttk.Combobox): The dropdown widget containing the model selection
+        max_tokens (int): Maximum tokens for completion
+        
+    Returns:
+        str: The API response text or None if an error occurred
+    """
+    selected_model = model_dropdown.get()
+    print(f"[DEBUG] Using model '{selected_model}' for API request.")
+    
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        params = {
+            "model": selected_model, 
+            "messages": messages, 
+            "max_completion_tokens": max_tokens, 
+            "stream": False
+        }
+        response = client.chat.completions.create(**params)
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[ERROR] Exception during API request: {e}")
+        return None
 
 # ------------------------ SECTION INFO PROMPT (Renamed) ------------------------
 def run_section_info_prompt():
@@ -419,21 +469,17 @@ def run_section_info_prompt():
     if not pdf_pages:
         print("[ERROR] No PDF content available. Please load a PDF first.")
         return
-    print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
+    
     for i, page_text in enumerate(pdf_pages):
-        print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
         prompt = (
             f"PDF Content:\n{page_text}\n\n"
             "Determine SECTIONTITLE, SECTIONNUMBER, PAGENUMBER. "
             "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
         )
         print(f"[DEBUG] Sending section info prompt for page {i+1}:\n{prompt}")
-        selected_model = section_model_dropdown.get()
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
-            response = client.chat.completions.create(**params)
-            api_result = response.choices[0].message.content.strip()
+        
+        api_result = send_prompt(prompt, section_model_dropdown)
+        if api_result:
             print(f"[DEBUG] API Response for page {i+1}: {api_result}")
             parts = api_result.split('|')
             if len(parts) >= 3:
@@ -443,8 +489,6 @@ def run_section_info_prompt():
                 print(f"[DEBUG] Parsed Section Info for page {i+1}: SECTIONTITLE='{section_title[i]}', SECTIONNUMBER='{section_number[i]}', PAGENUMBER='{page_number[i]}'")
             else:
                 print(f"[ERROR] Unable to parse section info for page {i+1}.")
-        except Exception as e:
-            print(f"[ERROR] Exception during section info prompt for page {i+1}: {e}")
 
 # ------------------------ ANSWER KEYWORDS PROMPT (Renamed) ------------------------
 def run_answer_keywords_prompt():
@@ -457,9 +501,8 @@ def run_answer_keywords_prompt():
     if not pdf_pages:
         print("[ERROR] No PDF content available. Please load a PDF first.")
         return
-    print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
+    
     for i, page_text in enumerate(pdf_pages):
-        print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
         prompt = (
             f"PDF Content:\n{page_text}\n\n"
             "Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
@@ -473,19 +516,14 @@ def run_answer_keywords_prompt():
             "Output the answers as a comma-separated list."
         )
         print(f"[DEBUG] Sending answer keywords prompt for page {i+1}:\n{prompt}")
-        selected_model = answer_model_dropdown.get()
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
-            response = client.chat.completions.create(**params)
-            api_result = response.choices[0].message.content.strip()
+        
+        api_result = send_prompt(prompt, answer_model_dropdown)
+        if api_result:
             print(f"[DEBUG] API Response for ANSWER keywords on page {i+1}: {api_result}")
             raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
             validated_answers = validate_and_replace_answers(i, raw_answers)
             answer_array[i] = validated_answers
             print(f"[DEBUG] Parsed ANSWER_ARRAY for page {i+1}: {answer_array[i]}")
-        except Exception as e:
-            print(f"[ERROR] Exception during answer keywords prompt for page {i+1}: {e}")
 
 # ------------------------ REMAINING PROMPTS (Generate Clues) ------------------------
 def get_next_clue_type(page_index=0):
@@ -511,19 +549,16 @@ def process_clue_for_answer(answer, page_index=0):
         break
     clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
     pdf_text = pdf_pages[page_index] if pdf_pages and len(pdf_pages) > page_index else "Cached PDF Context"
-    print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
+    
     prompt = (
         f"PDF Content:\n{pdf_text}\n\n"
         f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{clue_type}', '{clue_type_desc}'. "
         "Respond with a single line containing only the clue text. Do not include any labels or extra explanation."
     )
     print(f"[DEBUG] Prompt for answer '{answer}' on page {page_index+1}:\n{prompt}")
-    selected_model = clue_model_dropdown.get()
-    try:
-        messages = [{"role": "user", "content": prompt}]
-        params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
-        response = client.chat.completions.create(**params)
-        api_result = response.choices[0].message.content.strip()
+    
+    api_result = send_prompt(prompt, clue_model_dropdown)
+    if api_result:
         if api_result.lower().startswith("clue:"):
             api_result = api_result[len("clue:"):].strip()
         api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
@@ -532,13 +567,14 @@ def process_clue_for_answer(answer, page_index=0):
             create_tab(page_index, "", pdf_text)
         tree = tab_data[page_index]["treeview"]
         tree.insert("", "end", values=(section_title.get(page_index, ""), 
-                                        section_number.get(page_index, ""), 
-                                        page_number.get(page_index, ""), 
-                                        clue_type, api_result, answer))
+                                       section_number.get(page_index, ""), 
+                                       page_number.get(page_index, ""), 
+                                       clue_type, api_result, answer))
         return api_result
-    except Exception as e:
-        print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}: {e}")
-        return f"Error: {e}"
+    else:
+        error_msg = "Error generating clue"
+        print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}")
+        return error_msg
 
 def run_remaining_prompts():
     """
@@ -575,11 +611,9 @@ def run_combined_prompts():
             "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
         )
         print(f"[DEBUG] Sending section info prompt for page {page_index+1}:\n{prompt_section}")
-        try:
-            messages = [{"role": "user", "content": prompt_section}]
-            params = {"model": section_model_dropdown.get(), "messages": messages, "max_completion_tokens": 4096, "stream": False}
-            response = client.chat.completions.create(**params)
-            api_result = response.choices[0].message.content.strip()
+        
+        api_result = send_prompt(prompt_section, section_model_dropdown)
+        if api_result:
             print(f"[DEBUG] API Response for page {page_index+1}: {api_result}")
             parts = api_result.split('|')
             if len(parts) >= 3:
@@ -589,8 +623,6 @@ def run_combined_prompts():
                 print(f"[DEBUG] Parsed Section Info for page {page_index+1}: SECTIONTITLE='{section_title[page_index]}', SECTIONNUMBER='{section_number[page_index]}', PAGENUMBER='{page_number[page_index]}'")
             else:
                 print(f"[ERROR] Unable to parse section info for page {page_index+1}.")
-        except Exception as e:
-            print(f"[ERROR] Exception during section info prompt for page {page_index+1}: {e}")
 
         # Answer Keywords Prompt
         prompt_answer = (
@@ -606,18 +638,14 @@ def run_combined_prompts():
             "Output the answers as a comma-separated list."
         )
         print(f"[DEBUG] Sending answer keywords prompt for page {page_index+1}:\n{prompt_answer}")
-        try:
-            messages = [{"role": "user", "content": prompt_answer}]
-            params = {"model": answer_model_dropdown.get(), "messages": messages, "max_completion_tokens": 4096, "stream": False}
-            response = client.chat.completions.create(**params)
-            api_result = response.choices[0].message.content.strip()
+        
+        api_result = send_prompt(prompt_answer, answer_model_dropdown)
+        if api_result:
             print(f"[DEBUG] API Response for ANSWER keywords on page {page_index+1}: {api_result}")
             raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
             validated_answers = validate_and_replace_answers(page_index, raw_answers)
             answer_array[page_index] = validated_answers
             print(f"[DEBUG] Parsed ANSWER_ARRAY for page {page_index+1}: {answer_array[page_index]}")
-        except Exception as e:
-            print(f"[ERROR] Exception during answer keywords prompt for page {page_index+1}: {e}")
 
         # Clue Generation Prompt
         if page_index not in tab_data:
@@ -648,10 +676,9 @@ def resubmit_tab(page_index):
         page_clue_types[page_index] = None
         if choice:
             pdf_text = pdf_pages[page_index]
-            print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
             prompt = (
                 f"PDF Content:\n{pdf_text}\n\n"
-                "Determine as many unique ANSWER key words/phrases as possible from the PDF that meet these criteria:\n"
+                "Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
                 "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
                 "- May include spaces.\n"
                 "- No special characters, dashes, or punctuation.\n"
@@ -662,12 +689,9 @@ def resubmit_tab(page_index):
                 "Output the answers as a comma-separated list."
             )
             print(f"[DEBUG] Resubmit: Sending prompt for new answer keywords for page {page_index+1}:\n{prompt}")
-            selected_model = answer_model_dropdown.get()
-            try:
-                messages = [{"role": "user", "content": prompt}]
-                params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
-                response = client.chat.completions.create(**params)
-                api_result = response.choices[0].message.content.strip()
+            
+            api_result = send_prompt(prompt, answer_model_dropdown)
+            if api_result:
                 new_answers = validate_and_replace_answers(
                     page_index,
                     [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
@@ -676,8 +700,6 @@ def resubmit_tab(page_index):
                 print(f"[DEBUG] Resubmit: Parsed new ANSWER_ARRAY for page {page_index+1}: {new_answers}")
                 for answer in new_answers:
                     process_clue_for_answer(answer, page_index=page_index)
-            except Exception as e:
-                print(f"[ERROR] Exception during resubmit for new answers on page {page_index+1}: {e}")
         else:
             answers = answer_array.get(page_index, [])
             for answer in answers:
@@ -709,11 +731,11 @@ def on_arrow_key_dropdown(event, dropdown):
     dropdown.set(values[new_index])
     # Manually update the corresponding model info label
     if dropdown == section_model_dropdown:
-        update_section_model_info()
+        update_model_info('section')
     elif dropdown == answer_model_dropdown:
-        update_answer_model_info()
+        update_model_info('answer')
     elif dropdown == clue_model_dropdown:
-        update_clue_model_info()
+        update_model_info('clue')
     return "break"
 
 # ------------------------ BUILD THE GUI ------------------------
@@ -758,7 +780,7 @@ section_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, section_m
 section_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, section_model_dropdown))
 section_model_info_label = tk.Label(section_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
 section_model_info_label.pack(anchor="w")
-section_model_var.trace_add("write", lambda *args: update_section_model_info())
+section_model_var.trace_add("write", lambda *args: update_model_info('section'))
 
 # Answer Model Dropdown
 answer_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
@@ -771,7 +793,7 @@ answer_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, answer_mod
 answer_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, answer_model_dropdown))
 answer_model_info_label = tk.Label(answer_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
 answer_model_info_label.pack(anchor="w")
-answer_model_var.trace_add("write", lambda *args: update_answer_model_info())
+answer_model_var.trace_add("write", lambda *args: update_model_info('answer'))
 
 # Clue Model Dropdown
 clue_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
@@ -784,7 +806,7 @@ clue_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, clue_model_d
 clue_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, clue_model_dropdown))
 clue_model_info_label = tk.Label(clue_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
 clue_model_info_label.pack(anchor="w")
-clue_model_var.trace_add("write", lambda *args: update_clue_model_info())
+clue_model_var.trace_add("write", lambda *args: update_model_info('clue'))
 
 # Section Info Prompt Button
 section_prompt_frame = tk.Frame(root, bg="#2e2e2e")
