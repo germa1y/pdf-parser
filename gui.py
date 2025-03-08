@@ -788,42 +788,42 @@ clue_model_var.trace_add("write", lambda *args: update_clue_model_info())
 
 # Section Info Prompt Button
 section_prompt_frame = tk.Frame(root, bg="#2e2e2e")
-section_prompt_frame.pack(pady=10, padx=10, fill=tk.X)
+section_prompt_frame.pack(pady=2, padx=10, fill=tk.X)
 tk.Button(section_prompt_frame, text="Determine Section Info", 
           command=lambda: threading.Thread(target=run_section_info_prompt, daemon=True).start(),
-          bg="#444", fg="white").pack(pady=5)
+          bg="#444", fg="white").pack(pady=1)
 
 # Answer Keywords Prompt Button
 answer_prompt_frame = tk.Frame(root, bg="#2e2e2e")
-answer_prompt_frame.pack(pady=10, padx=10, fill=tk.X)
+answer_prompt_frame.pack(pady=2, padx=10, fill=tk.X)
 tk.Button(answer_prompt_frame, text="Determine Answer Keywords", 
           command=lambda: threading.Thread(target=run_answer_keywords_prompt, daemon=True).start(),
-          bg="#444", fg="white").pack(pady=5)
+          bg="#444", fg="white").pack(pady=1)
 
 # Clue Generation Prompt Button
 clue_prompt_frame = tk.Frame(root, bg="#2e2e2e")
-clue_prompt_frame.pack(pady=10, padx=10, fill=tk.X)
+clue_prompt_frame.pack(pady=2, padx=10, fill=tk.X)
 tk.Button(clue_prompt_frame, text="Generate Clues for Answers", 
           command=lambda: threading.Thread(target=run_remaining_prompts, daemon=True).start(),
-          bg="#444", fg="white").pack(pady=5)
+          bg="#444", fg="white").pack(pady=1)
 
 # Resubmit Button (Re-generate clues for tabs with Resubmit enabled)
 resubmit_frame = tk.Frame(root, bg="#2e2e2e")
-resubmit_frame.pack(pady=10, padx=10, fill=tk.X)
+resubmit_frame.pack(pady=2, padx=10, fill=tk.X)
 tk.Button(resubmit_frame, text="Resubmit", 
           command=lambda: threading.Thread(target=resubmit_all_tabs, daemon=True).start(),
-          bg="#444", fg="white").pack(pady=5)
+          bg="#444", fg="white").pack(pady=1)
 
 # Combined Prompts Button
 combined_prompt_frame = tk.Frame(root, bg="#2e2e2e")
-combined_prompt_frame.pack(pady=10, padx=10, fill=tk.X)
+combined_prompt_frame.pack(pady=2, padx=10, fill=tk.X)
 tk.Button(
     combined_prompt_frame,
     text="Process All Prompts for Each Page",
     command=lambda: threading.Thread(target=run_combined_prompts, daemon=True).start(),
     bg="#444",
     fg="white"
-).pack(pady=5)
+).pack(pady=1)
 
 # Output Notebook (For displaying rows for each page)
 output_frame = tk.Frame(root, bg="#2e2e2e")
