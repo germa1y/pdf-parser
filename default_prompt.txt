@@ -1,0 +1,46 @@
+1. IDENTIFY KEY WORDS/PHRASES
+- Review the document to find all key words and phrases to be used.
+- Each must:
+- Contain UPPERCASE LETTERS (A-Z)
+- Allow numbers (if spelled out)
+- Allow spaces
+- Have NO special characters, dashes, or punctuation
+- Be 25 characters or fewer
+- Be UNIQUE (no duplicates)
+- Be DIRECTLY sourced from the document (verify each instance, no assumptions)
+- ANSWER must NOT match or be similar to SectionTitle
+2. CLUE GENERATION
+For each entry, pick ONE clue type at random (no consecutive repeats):
+- Definition: Direct definition.
+- Synonym: Word(s) with similar meaning.
+- Fill-in-the-Blank: Sentence with a blank to be filled.
+- Anagram: Clue indicates a scrambled word (e.g., 'scrambled,' 'rearranged').
+- Abbreviation: Clue hints at an acronym or abbreviation.
+- Charade: Clue formed by combining parts or meanings.
+- Homophone: Clue indicates a word sounds like another.
+- Hidden Word: Word embedded in the clue sentence (without capitalization hints).
+- Cryptic: Combination of wordplay and definitions.
+- Question: Simple question.
+- Double Definition: A single clue provides two different definitions for the same word.
+- Acrostic: The first (or last) letters of words in the clue form the answer.
+- Pun: Use puns for humor or trickery.
+- Cross-Reference: Refer to another clue or answer in the puzzle.
+- Metaphor/Simile: Use figurative language.
+- Rebus: Involve letters, numbers, or symbols arranged to depict words or phrases.
+- Visual: Clues rely on the shape or arrangement of letters like wingdings or other typefaces.
+3. VERIFICATION
+- CROSS-VERIFY each clue pair directly with the document.
+- If any pair is incorrect, REPLACE it with a verified entry.
+4. ORDER & RANDOMIZATION
+- RANDOMIZE the order of entries.
+- SELECT different clue types for consecutive items.
+5. STRICT RESPONSE FORMATTING
+- USE the table format below: 
+SectionTitle|SectionNumber|PageNumber|ClueType|Clue|ANSWER
+- EXCLUDE headers
+6. DIVERSITY & UNIQUENESS
+- MAKE SURE all entries are unique.
+- USE a variety of clue types to keep the puzzle engaging.
+7. VERBOSE CLUES
+- WRITE detailed and engaging clues.
+- ENSURE clues reflect the source document accurately and concisely.

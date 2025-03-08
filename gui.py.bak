@@ -1,0 +1,1726 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import os
+import json
+import traceback
+import threading
+import time
+from datetime import datetime
+import random
+from openai import OpenAI
+from PyPDF2 import PdfReader
+import shelve
+import datetime
+import threading
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import time
+from collections import defaultdict
+
+# ------------------------ GLOBAL VARIABLES ------------------------
+selected_api_key = None
+selected_api_key_path = None
+MODEL_INFO = {}
+client = None  # OpenAI client instance
+pdf_pages = []  # Cached PDF page texts
+tab_data = {}   # Holds data for each page tab
+last_api_key_dir = None
+model_cache = None
+cache_file_path = None
+cache_lock = threading.Lock()  # For thread safety
+cache_status_label = None  # Label to show cache status
+cache_refresh_thread = None
+
+# Section info dictionaries (set by section prompt) per page index
+section_title = {}
+section_number = {}
+page_number = {}
+
+# Answer keywords dictionary (set by answer prompt) per page index
+answer_array = {}
+
+# Clue types and their descriptions
+CLUE_TYPES = [
+    "Definition", "Synonym", "Fill-in-the-Blank", "Anagram", "Abbreviation",
+    "Charade", "Homophone", "Hidden Word", "Cryptic", "Question",
+    "Double Definition", "Acrostic", "Pun", "Cross-Reference",
+    "Metaphor/Simile", "Rebus", "Visual"
+]
+
+CLUE_TYPE_DESC = {
+    "Definition": "Direct definition.",
+    "Synonym": "Word(s) with similar meaning.",
+    "Fill-in-the-Blank": "Sentence with a blank to be filled.",
+    "Anagram": "Clue indicates a scrambled word (e.g., 'scrambled,' 'rearranged').",
+    "Abbreviation": "Clue hints at an acronym or abbreviation.",
+    "Charade": "Clue formed by combining parts or meanings.",
+    "Homophone": "Clue indicates a word sounds like another.",
+    "Hidden Word": "Word embedded in the clue sentence (without capitalization hints; avoid all caps).",
+    "Cryptic": "Combination of wordplay and definitions.",
+    "Question": "Simple question.",
+    "Double Definition": "A single clue provides two different definitions for the same word.",
+    "Acrostic": "The first letters of each word in the sentence spell the answer.",
+    "Pun": "Use puns for humor or trickery.",
+    "Cross-Reference": "Refer to another clue or answer in the puzzle.",
+    "Metaphor/Simile": "Use figurative language.",
+    "Rebus": "Involve letters, numbers, or symbols arranged to depict words or phrases.",
+    "Visual": ("Clues rely on the shape or arrangement of symbolic typefaces "
+               "(Wingdings, Webdings, Zapf Dingbats, Dingbats, Entypo, FontAwesome, "
+               "Material Icons, Octicons, Noto Emoji, EmojiOne (JoyPixels), Twemoji, "
+               "Apple Color Emoji, Segoe UI Emoji, Bravura, Petrucci, Opus, Maestro, "
+               "Musical Symbols Unicode, Symbol, Cambria Math, STIX Two Math, Asana Math, "
+               "TeX Gyre Termes Math, ISO Technical Symbols, MT Extra, Lucida Math, AstroGadget, "
+               "AstroSymbols, Alchemy Symbols, Runic Unicode).")
+}
+
+analytics_data = {
+    "token_counts": {
+        "section": {"input": 0, "output": 0},
+        "answer": {"input": 0, "output": 0},
+        "clue": {"input": 0, "output": 0},
+        "total": {"input": 0, "output": 0}
+    },
+    "response_times": {
+        "section": [],
+        "answer": [],
+        "clue": []
+    },
+    "clue_types": defaultdict(int),
+    "costs": {
+        "section": 0.0,
+        "answer": 0.0,
+        "clue": 0.0,
+        "total": 0.0
+    },
+    "session_start": time.time(),
+    "api_calls": 0
+}
+
+# Dictionary to hold per-page randomized clue types
+page_clue_types = {}
+
+def initialize_model_cache():
+    """Initializes the model information cache."""
+    global model_cache, cache_file_path
+    
+    try:
+        # Create cache directory if it doesn't exist
+        cache_dir = os.path.join(os.path.expanduser("~"), ".llm_clue_generator", "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        cache_file_path = os.path.join(cache_dir, "model_cache")
+        model_cache = shelve.open(cache_file_path)
+        
+        print("[DEBUG] Model cache initialized.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize model cache: {e}")
+        traceback.print_exc()
+        model_cache = None
+
+def close_model_cache():
+    """Closes the model cache properly."""
+    global model_cache
+    if model_cache:
+        try:
+            model_cache.close()
+            print("[DEBUG] Model cache closed.")
+        except Exception as e:
+            print(f"[ERROR] Failed to close model cache: {e}")
+            traceback.print_exc()
+
+def get_cached_model_info(refresh=False):
+    """
+    Retrieves model information from cache or API.
+    
+    Args:
+        refresh: If True, force refresh from API even if cache is valid
+        
+    Returns:
+        Dictionary of model information
+    """
+    global MODEL_INFO
+    
+    # Check if cache is initialized
+    if not model_cache:
+        print("[DEBUG] Model cache not initialized. Using API.")
+        return retrieve_models_from_api()
+    
+    # Use lock for thread safety
+    with cache_lock:
+        cache_info = model_cache.get('cache_info', {})
+        models_info = model_cache.get('models_info', {})
+        
+        # Check if cache needs refresh
+        cache_valid = False
+        if not refresh and cache_info and models_info:
+            last_update = cache_info.get('last_update')
+            if last_update:
+                # Cache valid for 24 hours
+                cache_age = datetime.datetime.now() - last_update
+                cache_valid = cache_age.total_seconds() < 86400  # 24 hours
+        
+        if cache_valid:
+            print("[DEBUG] Using cached model information.")
+            if cache_status_label:
+                cache_status_label.config(text="Using cached model info")
+            MODEL_INFO = models_info
+            return models_info
+        else:
+            print("[DEBUG] Cache invalid or refresh requested. Using API.")
+            if cache_status_label:
+                cache_status_label.config(text="Refreshing model info...")
+            
+            # Get fresh data from API
+            new_models_info = retrieve_models_from_api()
+            
+            # Update cache
+            if new_models_info:
+                model_cache['models_info'] = new_models_info
+                model_cache['cache_info'] = {
+                    'last_update': datetime.datetime.now(),
+                    'source': 'api'
+                }
+                model_cache.sync()
+                
+                if cache_status_label:
+                    cache_status_label.config(text="Model info updated")
+                
+                MODEL_INFO = new_models_info
+                return new_models_info
+            else:
+                # API failed, use old cache if available
+                if models_info:
+                    print("[DEBUG] API failed, using existing cache.")
+                    if cache_status_label:
+                        cache_status_label.config(text="Using cached model info (API failed)")
+                    MODEL_INFO = models_info
+                    return models_info
+                else:
+                    print("[DEBUG] API failed and no cache available.")
+                    if cache_status_label:
+                        cache_status_label.config(text="No model info available")
+                    return {}
+
+def retrieve_models_from_api():
+    """
+    Retrieves model information directly from the API.
+    
+    Returns:
+        Dictionary of model information or empty dict on failure
+    """
+    if not client:
+        print("[DEBUG] No API client available.")
+        return {}
+    
+    try:
+        # Get models list
+        models_response = client.models.list()
+        
+        # Create base model info
+        models_info = {}
+        
+        # Add each model
+        for model in models_response.data:
+            # Basic info for all models
+            model_id = model.id
+            models_info[model_id] = {
+                "input_price": "0.0001",  # Default if not known
+                "output_price": "0.0002",  # Default if not known
+                "context_size": "8K",      # Default if not known
+                "new_model": False
+            }
+            
+            # OpenAI specific model details
+            if "gpt-4o" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.0005",
+                    "output_price": "0.0015",
+                    "context_size": "128K",
+                    "new_model": True
+                }
+            elif "gpt-4-turbo" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.0005",
+                    "output_price": "0.0015",
+                    "context_size": "128K",
+                    "new_model": True
+                }
+            elif "gpt-4" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.001",
+                    "output_price": "0.002",
+                    "context_size": "8K",
+                    "new_model": False
+                }
+            elif "gpt-3.5-turbo" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.0001",
+                    "output_price": "0.0002",
+                    "context_size": "16K",
+                    "new_model": False
+                }
+            elif "claude-3" in model_id and "sonnet" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.0005",
+                    "output_price": "0.0015",
+                    "context_size": "200K",
+                    "new_model": True
+                }
+            elif "claude-3" in model_id and "opus" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.001",
+                    "output_price": "0.003",
+                    "context_size": "200K",
+                    "new_model": True
+                }
+            elif "claude-3" in model_id and "haiku" in model_id:
+                models_info[model_id] = {
+                    "input_price": "0.00025",
+                    "output_price": "0.00075",
+                    "context_size": "200K",
+                    "new_model": True
+                }
+            
+        print(f"[DEBUG] Retrieved info for {len(models_info)} models from API.")
+        return models_info
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to retrieve models from API: {e}")
+        traceback.print_exc()
+        return {}
+
+def background_refresh_cache():
+    """
+    Refreshes the model cache in the background.
+    """
+    global cache_refresh_thread
+    
+    if cache_refresh_thread and cache_refresh_thread.is_alive():
+        print("[DEBUG] Cache refresh already in progress.")
+        return
+    
+    def refresh_task():
+        print("[DEBUG] Starting background cache refresh.")
+        try:
+            if cache_status_label:
+                cache_status_label.config(text="Refreshing model info...")
+            
+            # Force refresh
+            get_cached_model_info(refresh=True)
+            
+            print("[DEBUG] Background cache refresh complete.")
+            if cache_status_label:
+                cache_status_label.config(text="Model info updated")
+        except Exception as e:
+            print(f"[ERROR] Background cache refresh failed: {e}")
+            if cache_status_label:
+                cache_status_label.config(text="Refresh failed")
+    
+    # Start background thread
+    cache_refresh_thread = threading.Thread(target=refresh_task, daemon=True)
+    cache_refresh_thread.start()
+
+def create_cache_status_ui(parent_frame):
+    """Creates UI elements for cache status and control."""
+    cache_frame = tk.Frame(parent_frame, bg=theme_settings[current_theme]["bg"])
+    cache_frame.pack(side=tk.RIGHT, padx=5)
+    
+    # Status label
+    global cache_status_label
+    cache_status_label = tk.Label(
+        cache_frame,
+        text="Cache not initialized",
+        bg=theme_settings[current_theme]["bg"],
+        fg=theme_settings[current_theme]["fg"],
+        font=("Helvetica", 8)
+    )
+    cache_status_label.pack(side=tk.LEFT, padx=2)
+    
+    # Refresh button
+    refresh_button = tk.Button(
+        cache_frame,
+        text="⟳",  # Refresh symbol
+        command=background_refresh_cache,
+        bg=theme_settings[current_theme]["button_bg"],
+        fg=theme_settings[current_theme]["button_fg"],
+        width=2,
+        font=("Helvetica", 10, "bold")
+    )
+    refresh_button.pack(side=tk.LEFT, padx=2)
+    
+    # Add tooltip to refresh button
+    ToolTip(refresh_button, "Refresh model information cache")
+    
+    return cache_frame
+
+def load_model_info_with_cache():
+    """Loads model information using the cache system."""
+    global MODEL_INFO
+    
+    json_directory = os.path.dirname(selected_api_key_path) if selected_api_key_path else os.getcwd()
+    json_file = os.path.join(json_directory, "model_info.json")
+    
+    if os.path.exists(json_file):
+        # Load from JSON file first as fallback
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                MODEL_INFO = json.load(f)
+            print(f"[DEBUG] Loaded model_info.json from {json_file}.")
+        except Exception as e:
+            traceback.print_exc()
+            MODEL_INFO = {}
+    
+    # Then try to get from cache, which may refresh from API
+    cached_info = get_cached_model_info()
+    if cached_info:
+        MODEL_INFO = cached_info
+    
+    # If we have info, update the dropdowns
+    if MODEL_INFO:
+        # Make sure the model dropdown listeners are set up
+        section_model_var.trace_add("write", lambda *args: update_section_model_info())
+        answer_model_var.trace_add("write", lambda *args: update_answer_model_info())
+        clue_model_var.trace_add("write", lambda *args: update_clue_model_info())
+
+def retrieve_models():
+    """Enhanced version with cache support."""
+    if not client:
+        messagebox.showerror("Error", "Please select an API key first.")
+        return
+    
+    try:
+        # First try to get models from cache
+        cached_info = get_cached_model_info()
+        
+        # Get actual models list from API
+        models = client.models.list()
+        available_models = sorted([m.id for m in models])
+        
+        if not available_models:
+            messagebox.showinfo("Info", "No models found for the selected API key.")
+            return
+            
+        # Set dropdown values for all three prompt types with defaults:
+        section_model_dropdown['values'] = available_models
+        section_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        
+        answer_model_dropdown['values'] = available_models
+        answer_model_dropdown.set("gpt-4-turbo" if "gpt-4-turbo" in available_models else available_models[0])
+        
+        clue_model_dropdown['values'] = available_models
+        clue_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
+        
+        # Update model info labels explicitly on initialization.
+        update_section_model_info()
+        update_answer_model_info()
+        update_clue_model_info()
+
+        # Optionally adjust widths
+        max_width = max(len(model) for model in available_models) + 2
+        for dd in (section_model_dropdown, answer_model_dropdown, clue_model_dropdown):
+            dd.config(width=max(20, max_width))
+    except Exception as e:
+        traceback.print_exc()
+        messagebox.showerror("Error", f"Failed to retrieve models: {e}")
+
+def browse_api_key():
+    """Enhanced version with cache initialization."""
+    global selected_api_key, selected_api_key_path, client, last_api_key_dir
+    initial_dir = last_api_key_dir if last_api_key_dir else os.getcwd()
+    file_path = filedialog.askopenfilename(
+        title="Select API Key File",
+        initialdir=initial_dir,
+        filetypes=[("Text Files", "*.txt")]
+    )
+    if file_path:
+        last_api_key_dir = os.path.dirname(file_path)
+        selected_api_key_path = file_path
+        try:
+            with open(file_path, "r") as f:
+                raw_key = f.read().strip()
+            filename = os.path.basename(file_path)
+            
+            # Set up API client based on key and filename
+            if "OpenAI" in filename or raw_key.startswith("sk-"):
+                selected_api_key = raw_key
+                client_temp = OpenAI(api_key=selected_api_key)
+            elif "DeepSeek" in filename:
+                selected_api_key = raw_key
+                client_temp = OpenAI(api_key=selected_api_key, base_url="https://api.deepseek.com")
+            else:
+                selected_api_key = raw_key
+                if raw_key.startswith("sk-"):
+                    client_temp = OpenAI(api_key=selected_api_key)
+                else:
+                    client_temp = OpenAI(api_key=selected_api_key, base_url="https://api.deepseek.com")
+                    
+            # Validate key
+            try:
+                test_models = client_temp.models.list()
+                if hasattr(test_models, "data"):
+                    count = len(test_models.data)
+                else:
+                    count = "unknown"
+            except Exception as e:
+                print("[ERROR] Failed to validate API key.")
+                traceback.print_exc()
+                messagebox.showerror("API Key Error", f"Failed to validate key: {e}")
+                return
+                
+            # Key is valid, set up client and UI
+            client = client_temp
+            api_key_label.config(text=filename)
+            
+            # Initialize cache after setting client
+            initialize_model_cache()
+            
+            # Get models with cache support
+            retrieve_models()
+            
+            # Load model info with cache
+            load_model_info_with_cache()
+            
+            # Update status
+            if cache_status_label:
+                cache_status_label.config(text="Cache ready")
+                
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to load API key: {e}")
+    else:
+        messagebox.showinfo("Info", "No API key file selected.")
+
+def on_closing():
+    """Handle application closing."""
+    # Close model cache properly
+    close_model_cache()
+    
+    # Close the window
+    root.destroy()
+    
+# ------------------------ API KEY & MODEL FUNCTIONS ------------------------
+def browse_api_key():
+    global selected_api_key, selected_api_key_path, client, last_api_key_dir
+    initial_dir = last_api_key_dir if last_api_key_dir else os.getcwd()
+    file_path = filedialog.askopenfilename(
+        title="Select API Key File",
+        initialdir=initial_dir,
+        filetypes=[("Text Files", "*.txt")]
+    )
+    if file_path:
+        last_api_key_dir = os.path.dirname(file_path)
+        selected_api_key_path = file_path
+        try:
+            with open(file_path, "r") as f:
+                raw_key = f.read().strip()
+            filename = os.path.basename(file_path)
+            print(f"[DEBUG] Raw API Key: {raw_key[:20]}...")
+            print(f"[DEBUG] File selected: {filename}")
+            if "OpenAI" in filename:
+                print("[DEBUG] Detected API.OpenAI.txt, using OpenAI endpoint.")
+                selected_api_key = raw_key
+                client_temp = OpenAI(api_key=selected_api_key)
+            elif "DeepSeek" in filename:
+                print("[DEBUG] Detected API.DeepSeek.txt, using DeepSeek endpoint.")
+                selected_api_key = raw_key
+                client_temp = OpenAI(api_key=selected_api_key, base_url="https://api.deepseek.com")
+            else:
+                if raw_key.startswith("sk-"):
+                    print("[DEBUG] Key starts with 'sk-', treating as OpenAI key.")
+                    selected_api_key = raw_key
+                    client_temp = OpenAI(api_key=selected_api_key)
+                else:
+                    print("[DEBUG] Key does not start with 'sk-', treating as DeepSeek key.")
+                    selected_api_key = raw_key
+                    client_temp = OpenAI(api_key=selected_api_key, base_url="https://api.deepseek.com")
+            try:
+                test_models = client_temp.models.list()
+                if hasattr(test_models, "data"):
+                    count = len(test_models.data)
+                else:
+                    count = "unknown"
+                print(f"[DEBUG] Key validated successfully. Found {count} models.")
+            except Exception as e:
+                print("[ERROR] Failed to validate API key.")
+                traceback.print_exc()
+                messagebox.showerror("API Key Error", f"Failed to validate key: {e}")
+                return
+            client = client_temp
+            api_key_label.config(text=filename)
+            retrieve_models()
+            load_model_info()
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to load API key: {e}")
+    else:
+        messagebox.showinfo("Info", "No API key file selected.")
+
+def retrieve_models():
+    if not client:
+        messagebox.showerror("Error", "Please select an API key first.")
+        return
+    try:
+        models = client.models.list()
+        available_models = sorted([m.id for m in models])
+        if not available_models:
+            messagebox.showinfo("Info", "No models found for the selected API key.")
+            return
+        # Set dropdown values for all three prompt types with defaults:
+        section_model_dropdown['values'] = available_models
+        section_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        
+        answer_model_dropdown['values'] = available_models
+        answer_model_dropdown.set("gpt-4-turbo" if "gpt-4-turbo" in available_models else available_models[0])
+        
+        clue_model_dropdown['values'] = available_models
+        clue_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
+        
+        # Update model info labels explicitly on initialization.
+        update_section_model_info()
+        update_answer_model_info()
+        update_clue_model_info()
+
+        # Optionally adjust widths
+        max_width = max(len(model) for model in available_models) + 2
+        for dd in (section_model_dropdown, answer_model_dropdown, clue_model_dropdown):
+            dd.config(width=max(20, max_width))
+    except Exception as e:
+        traceback.print_exc()
+        messagebox.showerror("Error", f"Failed to retrieve models: {e}")
+
+def update_section_model_info(*args):
+    selected_model = section_model_dropdown.get().strip()
+    print("Section model selected:", selected_model)
+    if selected_model in MODEL_INFO:
+        details = MODEL_INFO[selected_model]
+        input_price = details.get("input_price", "N/A")
+        output_price = details.get("output_price", "N/A")
+        context_size = details.get("context_size", "N/A")
+        is_new = details.get("new_model", False)
+        model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
+        if is_new:
+            section_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
+        else:
+            section_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
+    else:
+        section_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
+
+def update_answer_model_info(*args):
+    selected_model = answer_model_dropdown.get().strip()
+    print("Answer model selected:", selected_model)
+    if selected_model in MODEL_INFO:
+        details = MODEL_INFO[selected_model]
+        input_price = details.get("input_price", "N/A")
+        output_price = details.get("output_price", "N/A")
+        context_size = details.get("context_size", "N/A")
+        is_new = details.get("new_model", False)
+        model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
+        if is_new:
+            answer_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
+        else:
+            answer_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
+    else:
+        answer_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
+
+def update_clue_model_info(*args):
+    selected_model = clue_model_dropdown.get().strip()
+    print("Clue model selected:", selected_model)
+    if selected_model in MODEL_INFO:
+        details = MODEL_INFO[selected_model]
+        input_price = details.get("input_price", "N/A")
+        output_price = details.get("output_price", "N/A")
+        context_size = details.get("context_size", "N/A")
+        is_new = details.get("new_model", False)
+        model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
+        if is_new:
+            clue_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
+        else:
+            clue_model_info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
+    else:
+        clue_model_info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
+
+def load_model_info():
+    global MODEL_INFO
+    json_directory = os.path.dirname(selected_api_key_path) if selected_api_key_path else os.getcwd()
+    json_file = os.path.join(json_directory, "model_info.json")
+    if not os.path.exists(json_file):
+        print(f"Warning: model_info.json not found at {json_file}.")
+        MODEL_INFO = {}
+        return
+    try:
+        with open(json_file, "r", encoding="utf-8") as f:
+            MODEL_INFO = json.load(f)
+        print(f"[DEBUG] Loaded model_info.json from {json_file}.")
+    except Exception as e:
+        traceback.print_exc()
+        MODEL_INFO = {}
+
+# ------------------------ PDF HANDLING ------------------------
+def browse_pdf():
+    global pdf_pages
+    pdf_path = filedialog.askopenfilename(
+        title="Select PDF File",
+        filetypes=[("PDF Files", "*.pdf")],
+        initialdir=os.getcwd()
+    )
+    if not pdf_path:
+        pdf_filename_label.config(text="No PDF selected")
+        return
+    if not pdf_path.lower().endswith(".pdf"):
+        messagebox.showerror("Invalid File", "Please select a valid PDF file.")
+        pdf_filename_label.config(text="No PDF selected")
+        return
+    try:
+        reader = PdfReader(pdf_path)
+        pdf_pages = [page.extract_text() if page.extract_text() else "Empty Page" for page in reader.pages]
+        filename = os.path.basename(pdf_path)
+        pdf_filename_label.config(text=filename)
+        print(f"[DEBUG] PDF loaded with {len(pdf_pages)} pages.")
+    except Exception as e:
+        traceback.print_exc()
+        messagebox.showerror("Error", f"Failed to process PDF: {e}")
+        pdf_filename_label.config(text="No PDF selected")
+
+# ------------------------ RESPONSE DISPLAY HANDLING ------------------------
+def clear_output_display():
+    for tab in output_notebook.tabs():
+        output_notebook.forget(tab)
+    tab_data.clear()
+    print("[DEBUG] Response display area cleared.")
+
+def on_cell_double_click(event):
+    """Handle double-click on a cell in the treeview."""
+    tree = event.widget
+    if not tree.identify_row(event.y):
+        return  # Clicked on empty space or header
+    
+    column = tree.identify_column(event.x)
+    if not column:
+        return
+    
+    # Get column index (remove the # character)
+    column_index = int(column.replace('#', '')) - 1
+    
+    # Get the item ID for the clicked row
+    item_id = tree.identify_row(event.y)
+    
+    # Get the values of the selected row
+    values = tree.item(item_id, "values")
+    
+    # Don't allow editing of empty rows or the checkbox column
+    if not values or column_index == 0:
+        return
+    
+    # Create an editor appropriate for the cell type
+    if column_index == 4:  # ClueType column (0-based index, since Select is column 0)
+        create_dropdown_editor(tree, item_id, column, column_index, values)
+    elif column_index not in [0, 6]:  # Don't allow editing of Select or Answer columns
+        create_text_editor(tree, item_id, column, column_index, values)
+
+def create_text_editor(tree, item_id, column, column_index, values):
+    """Create a text editor for a cell."""
+    # Get the cell's coordinates
+    x, y, width, height = tree.bbox(item_id, column)
+    
+    # Create and place a text entry widget
+    entry = tk.Entry(tree, width=width // 10)
+    entry.insert(0, values[column_index])
+    entry.select_range(0, tk.END)
+    entry.focus()
+    
+    # Position the entry widget
+    entry.place(x=x, y=y, width=width, height=height)
+    
+    def on_entry_return(event):
+        # Get the new value
+        new_value = entry.get()
+        
+        # Update the treeview with the new value
+        new_values = list(values)
+        new_values[column_index] = new_value
+        tree.item(item_id, values=new_values)
+        
+        # Clean up
+        entry.destroy()
+    
+    def on_entry_escape(event):
+        # Cancel editing
+        entry.destroy()
+    
+    def on_focus_out(event):
+        # Similar to pressing Enter
+        on_entry_return(event)
+    
+    # Bind events
+    entry.bind("<Return>", on_entry_return)
+    entry.bind("<Escape>", on_entry_escape)
+    entry.bind("<FocusOut>", on_focus_out)
+
+def create_dropdown_editor(tree, item_id, column, column_index, values):
+    """Create a dropdown editor for the ClueType column."""
+    # Get the cell's coordinates
+    x, y, width, height = tree.bbox(item_id, column)
+    
+    # Create a frame to hold the dropdown
+    frame = tk.Frame(tree)
+    frame.place(x=x, y=y, width=width, height=height)
+    
+    # Create a dropdown with clue types
+    var = tk.StringVar(value=values[column_index])
+    dropdown = ttk.Combobox(frame, textvariable=var, values=CLUE_TYPES, state="readonly")
+    dropdown.pack(fill=tk.BOTH, expand=True)
+    dropdown.focus()
+    
+    def on_selection(event):
+        # Get the new value
+        new_value = var.get()
+        
+        # Update the treeview with the new value and clear the clue
+        new_values = list(values)
+        new_values[column_index] = new_value  # ClueType
+        new_values[5] = ""  # Clear Clue
+        tree.item(item_id, values=new_values)
+        
+        # Clean up
+        frame.destroy()
+        
+        # Regenerate the clue with the new clue type
+        page_index = next((i for i, data in tab_data.items() if data["treeview"] == tree), None)
+        if page_index is not None:
+            answer = new_values[6]  # Answer is in column 6
+            process_clue_for_answer(answer, page_index=page_index, specified_clue_type=new_value)
+            # Delete the old row after generating the new one
+            tree.delete(item_id)
+    
+    def on_focus_out(event):
+        frame.destroy()
+    
+    # Bind events
+    dropdown.bind("<<ComboboxSelected>>", on_selection)
+    dropdown.bind("<FocusOut>", on_focus_out)
+
+def create_tab(page_index, api_response, pdf_text):
+    """Creates a new tab to display responses for a given page, with a working Resubmit checkbox."""
+    global tab_data
+    if page_index in tab_data:
+        return  # Tab already exists
+        
+    tab_frame = tk.Frame(output_notebook, bg="#444")
+    
+    # Get the page number from our stored data, defaulting to page_index + 1 if not found
+    tab_name = page_number.get(page_index, str(page_index + 1))
+    output_notebook.add(tab_frame, text=tab_name)
+    
+    # After adding the new tab, sort all tabs based on their text values
+    tab_ids = output_notebook.tabs()
+    tab_info = []
+    for tab_id in tab_ids:
+        tab_text = output_notebook.tab(tab_id, "text")
+        tab_info.append((tab_text, tab_id))
+    
+    # Sort tabs based on their text values
+    tab_info.sort(key=lambda x: x[0])
+    
+    # Reorder tabs
+    for i, (_, tab_id) in enumerate(tab_info):
+        output_notebook.insert(i, tab_id)
+    
+    resubmit_var = tk.IntVar(value=0)
+    style = ttk.Style()
+    style.configure("Custom.TCheckbutton", background="#2e2e2e", foreground="white")
+    resubmit_checkbox = ttk.Checkbutton(
+        tab_frame,
+        text="Resubmit",
+        variable=resubmit_var,
+        style="Custom.TCheckbutton"
+    )
+    resubmit_checkbox.pack(side=tk.TOP, anchor="w")
+    
+    # Create treeview with checkbox column
+    columns = ("Select", "SectionTitle", "SectionNumber", "PageNumber", "ClueType", "Clue", "Answer")
+    tree = ttk.Treeview(tab_frame, columns=columns, show="headings")
+    
+    # Configure checkbox column
+    tree.heading("Select", text="✓")
+    tree.column("Select", width=30, anchor="center")
+    
+    # Configure other columns
+    for col in columns[1:]:  # Skip the Select column
+        tree.heading(col, text=col)
+        tree.column(col, width=100)
+    
+    # Dictionary to store checkbox states
+    checkbox_states = {}
+    
+    def toggle_checkbox(event):
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+            
+        # Get click region
+        region = tree.identify_region(event.x, event.y)
+        if region == "cell":
+            # Get clicked column
+            col = tree.identify_column(event.x)
+            if col == "#1":  # First column (checkbox)
+                current_state = checkbox_states.get(item_id, False)
+                new_state = not current_state
+                checkbox_states[item_id] = new_state
+                # Update checkbox display
+                tree.set(item_id, "Select", "✓" if new_state else "")
+    
+    # Bind checkbox click
+    tree.bind("<Button-1>", toggle_checkbox)
+    
+    # Bind double-click event to enable editing (only for non-checkbox columns)
+    def on_double_click(event):
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+        
+        col = tree.identify_column(event.x)
+        if col != "#1":  # Skip checkbox column
+            on_cell_double_click(event)
+    
+    tree.bind("<Double-1>", on_double_click)
+    
+    # Bind right-click for context menu
+    tree.bind("<Button-3>", lambda event, tree=tree, page_idx=page_index: show_context_menu(event, tree, page_idx))
+    
+    tree.pack(fill=tk.BOTH, expand=True)
+    tab_data[page_index] = {
+        "frame": tab_frame,
+        "treeview": tree,
+        "resubmit_var": resubmit_var,
+        "checkbox_states": checkbox_states
+    }
+    print(f"[DEBUG] Created tab for page {page_index + 1} with name '{tab_name}'.")
+
+# ------------------------ HELPER FUNCTION: VALIDATE ANSWERS ------------------------
+def validate_and_replace_answers(page_index, answers):
+    """
+    Validates each answer so that it is 25 characters or fewer (including spaces).
+    If an answer exceeds 25 characters, this function prompts the API (up to 3 attempts)
+    to generate a replacement that meets the criteria.
+    Returns a list of validated answers.
+    """
+    valid_answers = []
+    selected_model = answer_model_dropdown.get()
+    pdf_text = pdf_pages[page_index]
+
+    for ans in answers:
+        if len(ans) <= 25:
+            valid_answers.append(ans)
+        else:
+            attempts = 0
+            new_answer = None
+            while attempts < 3:
+                print(f"[DEBUG] Using model '{selected_model}' for Answer Validation.")
+                prompt = (
+                    f"PDF Content:\n{pdf_text}\n\n"
+                    f"The previously generated answer '{ans}' is longer than 25 characters. "
+                    "Please generate a new, unique answer keyword/phrase that meets these criteria:\n"
+                    "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
+                    "- May include spaces.\n"
+                    "- No special characters, dashes, or punctuation.\n"
+                    "- 25 characters or fewer.\n"
+                    "- Directly sourced from the document.\n"
+                    "Output only the answer."
+                )
+                try:
+                    messages = [{"role": "user", "content": prompt}]
+                    params = {"model": selected_model, "messages": messages, "max_completion_tokens": 100, "stream": False}
+                    response = client.chat.completions.create(**params)
+                    new_answer = response.choices[0].message.content.strip().upper()
+                    if len(new_answer) <= 25 and new_answer not in valid_answers:
+                        valid_answers.append(new_answer)
+                        break
+                    else:
+                        attempts += 1
+                except Exception as e:
+                    print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}: {e}")
+                    attempts += 1
+            if new_answer is None or len(new_answer) > 25:
+                print(f"[DEBUG] Unable to generate a valid answer for '{ans}' on page {page_index+1} after {attempts} attempts.")
+    return valid_answers
+
+# ------------------------ SECTION INFO PROMPT (Renamed) ------------------------
+def run_section_info_prompt():
+    """
+    For each page in the PDF, submits its content with instructions to determine SECTIONTITLE, SECTIONNUMBER, and PAGENUMBER.
+    The response is expected in a pipe-delimited format and stored in dictionaries keyed by page index.
+    Uses the Section Model dropdown.
+    """
+    global section_title, section_number, page_number
+    if not pdf_pages:
+        print("[ERROR] No PDF content available. Please load a PDF first.")
+        return
+    
+    for i, page_text in enumerate(pdf_pages):
+        selected_model = section_model_dropdown.get()
+        print(f"[DEBUG] Using model '{selected_model}' for Section Info.")
+        prompt = (
+            f"PDF Content:\n{page_text}\n\n"
+            "Determine SECTIONTITLE, SECTIONNUMBER, PAGENUMBER. "
+            "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
+        )
+        print(f"[DEBUG] Sending section info prompt for page {i+1}:\n{prompt}")
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+            response = client.chat.completions.create(**params)
+            api_result = response.choices[0].message.content.strip()
+            print(f"[DEBUG] API Response for page {i+1}: {api_result}")
+            parts = api_result.split('|')
+            if len(parts) >= 3:
+                section_title[i] = parts[0].strip()
+                section_number[i] = parts[1].strip()
+                page_number[i] = validate_page_number(parts[2].strip())
+                print(f"[DEBUG] Parsed Section Info for page {i+1}: SECTIONTITLE='{section_title[i]}', SECTIONNUMBER='{section_number[i]}', PAGENUMBER='{page_number[i]}'")
+            else:
+                print(f"[ERROR] Unable to parse section info for page {i+1}.")
+        except Exception as e:
+            print(f"[ERROR] Exception during section info prompt for page {i+1}: {e}")
+
+# ------------------------ ANSWER KEYWORDS PROMPT (Renamed) ------------------------
+def run_answer_keywords_prompt():
+    """
+    For each page in the PDF, submits its content with instructions to determine ANSWER key words/phrases.
+    Converts all extracted answers to uppercase and ensures each answer is ≤ 25 characters.
+    Uses the Answer Model dropdown.
+    """
+    global answer_array
+    if not pdf_pages:
+        print("[ERROR] No PDF content available. Please load a PDF first.")
+        return
+    
+    # Determine how many answers to generate (if specified)
+    num_answers = answers_count_var.get()
+    try:
+        num_answers = int(num_answers)
+        if num_answers <= 0:
+            num_answers = None  # Default behavior
+    except (ValueError, TypeError):
+        num_answers = None  # Default behavior
+    
+    for i, page_text in enumerate(pdf_pages):
+        selected_model = answer_model_dropdown.get()
+        print(f"[DEBUG] Using model '{selected_model}' for Answer Keywords.")
+        
+        answer_limit_text = f"Generate exactly {num_answers} answers." if num_answers else "Generate as many answers as appropriate."
+        
+        prompt = (
+            f"PDF Content:\n{page_text}\n\n"
+            "Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
+            "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
+            "- May include spaces.\n"
+            "- No special characters, dashes, or punctuation.\n"
+            "- 25 characters or fewer.\n"
+            "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
+            "- For phrases with repetitive words, drop the redundant word.\n"
+            "- Must not match or be similar to the SECTIONTITLE.\n"
+            f"- {answer_limit_text}\n"
+            "Output the answers as a comma-separated list."
+        )
+        print(f"[DEBUG] Sending answer keywords prompt for page {i+1}:\n{prompt}")
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+            response = client.chat.completions.create(**params)
+            api_result = response.choices[0].message.content.strip()
+            print(f"[DEBUG] API Response for ANSWER keywords on page {i+1}: {api_result}")
+            raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
+            validated_answers = validate_and_replace_answers(i, raw_answers)
+            
+            # If a specific count was requested, limit the answers
+            if num_answers and len(validated_answers) > num_answers:
+                validated_answers = validated_answers[:num_answers]
+                
+            answer_array[i] = validated_answers
+            print(f"[DEBUG] Parsed ANSWER_ARRAY for page {i+1}: {answer_array[i]}")
+        except Exception as e:
+            print(f"[ERROR] Exception during answer keywords prompt for page {i+1}: {e}")
+
+# ------------------------ REMAINING PROMPTS (Generate Clues) ------------------------
+def get_next_clue_type(page_index=0):
+    """Returns the next randomized clue type for the given page."""
+    if page_index not in page_clue_types or not page_clue_types[page_index]:
+        shuffled = CLUE_TYPES.copy()
+        random.shuffle(shuffled)
+        page_clue_types[page_index] = shuffled
+    return page_clue_types[page_index].pop(0)
+
+def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
+    """
+    Builds the prompt to generate a clue for the given answer using a CLUETYPE
+    and its description, then sends it to the API.
+    Uses the Clue Model dropdown.
+    
+    If specified_clue_type is provided, uses that instead of getting a random type.
+    ClueType 'Acrostic' is only allowed if the answer (excluding spaces) has 10 or fewer letters.
+    """
+    answer_length = len(answer.replace(" ", ""))
+    
+    if specified_clue_type:
+        # Use the specified clue type, unless it's Acrostic and the answer is too long
+        if specified_clue_type == "Acrostic" and answer_length > 10:
+            clue_type = get_next_clue_type(page_index)  # Get a different type
+            print(f"[DEBUG] Acrostic not suitable for '{answer}', using '{clue_type}' instead")
+        else:
+            clue_type = specified_clue_type
+    else:
+        # Get a random clue type as before
+        while True:
+            clue_type = get_next_clue_type(page_index)
+            if clue_type == "Acrostic" and answer_length > 10:
+                continue
+            break
+            
+    clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
+    pdf_text = pdf_pages[page_index] if pdf_pages and len(pdf_pages) > page_index else "Cached PDF Context"
+    
+    selected_model = clue_model_dropdown.get()
+    print(f"[DEBUG] Using model '{selected_model}' for Clue Generation.")
+    prompt = (
+        f"PDF Content:\n{pdf_text}\n\n"
+        f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{clue_type}', '{clue_type_desc}'. "
+        "Respond with a single line containing only the clue text. Do not include any labels or extra explanation."
+    )
+    print(f"[DEBUG] Prompt for answer '{answer}' on page {page_index+1}:\n{prompt}")
+    
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+        response = client.chat.completions.create(**params)
+        api_result = response.choices[0].message.content.strip()
+        if api_result.lower().startswith("clue:"):
+            api_result = api_result[len("clue:"):].strip()
+        api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
+        print(f"[DEBUG] API Response for answer '{answer}' on page {page_index+1}: {api_result}")
+        if page_index not in tab_data:
+            create_tab(page_index, "", pdf_text)
+        tree = tab_data[page_index]["treeview"]
+        # Insert row with empty checkbox and correct column order
+        tree.insert("", "end", values=(
+            "",  # Select (checkbox)
+            section_title.get(page_index, ""),  # SectionTitle
+            section_number.get(page_index, ""),  # SectionNumber
+            page_number.get(page_index, ""),  # PageNumber
+            clue_type,  # ClueType
+            api_result,  # Clue
+            answer  # Answer
+        ))
+        return api_result
+    except Exception as e:
+        print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}: {e}")
+        return f"Error: {e}"
+
+def run_remaining_prompts():
+    """
+    For each page that has answers in answer_array, cycles through its ANSWER_ARRAY.
+    For each answer, a clue is generated and a row is populated with:
+    SECTIONTITLE | SECTIONNUMBER | PAGENUMBER | CLUETYPE | CLUE | ANSWER.
+    After processing each page, prints a debug message indicating the last row has been populated.
+    """
+    if not answer_array:
+        print("[ERROR] answer_array is empty. Please run the answer keywords prompt first.")
+        return
+    for page_index in answer_array.keys():
+        for answer in answer_array[page_index]:
+            process_clue_for_answer(answer, page_index=page_index)
+        print(f"[DEBUG] Last row populated for page {page_index + 1}.")
+
+# ------------------------ COMBINED PROMPTS (All Steps) ------------------------
+def run_combined_prompts():
+    """
+    Processes each page sequentially:
+    1. Determines SECTIONTITLE, SECTIONNUMBER, PAGENUMBER using the Section Model.
+    2. Determines ANSWER key words/phrases using the Answer Model.
+    3. Generates clues for each answer using the Clue Model.
+    
+    If specified, limits the number of answers per page.
+    """
+    if not pdf_pages:
+        print("[ERROR] No PDF content available. Please load a PDF first.")
+        return
+
+    # Determine how many answers to generate (if specified)
+    num_answers = answers_count_var.get()
+    try:
+        num_answers = int(num_answers)
+        if num_answers <= 0:
+            num_answers = None  # Default behavior
+    except (ValueError, TypeError):
+        num_answers = None  # Default behavior
+
+    for page_index, page_text in enumerate(pdf_pages):
+        # Section Info Prompt
+        section_model = section_model_dropdown.get()
+        print(f"[DEBUG] Using model '{section_model}' for Section Info.")
+        prompt_section = (
+            f"PDF Content:\n{page_text}\n\n"
+            "Determine SECTIONTITLE, SECTIONNUMBER, PAGENUMBER. "
+            "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
+        )
+        print(f"[DEBUG] Sending section info prompt for page {page_index+1}:\n{prompt_section}")
+        try:
+            messages = [{"role": "user", "content": prompt_section}]
+            params = {"model": section_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+            response = client.chat.completions.create(**params)
+            api_result = response.choices[0].message.content.strip()
+            print(f"[DEBUG] API Response for page {page_index+1}: {api_result}")
+            parts = api_result.split('|')
+            if len(parts) >= 3:
+                section_title[page_index] = parts[0].strip()
+                section_number[page_index] = parts[1].strip()
+                page_number[page_index] = validate_page_number(parts[2].strip())
+                print(f"[DEBUG] Parsed Section Info for page {page_index+1}: SECTIONTITLE='{section_title[page_index]}', SECTIONNUMBER='{section_number[page_index]}', PAGENUMBER='{page_number[page_index]}'")
+            else:
+                print(f"[ERROR] Unable to parse section info for page {page_index+1}.")
+        except Exception as e:
+            print(f"[ERROR] Exception during section info prompt for page {page_index+1}: {e}")
+
+        # Answer Keywords Prompt
+        answer_model = answer_model_dropdown.get()
+        print(f"[DEBUG] Using model '{answer_model}' for Answer Keywords.")
+        answer_limit_text = f"Generate exactly {num_answers} answers." if num_answers else "Generate as many answers as appropriate."
+        prompt_answer = (
+            f"PDF Content:\n{page_text}\n\n"
+            f"Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
+            "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
+            "- May include spaces.\n"
+            "- No special characters, dashes, or punctuation.\n"
+            "- 25 characters or fewer.\n"
+            "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
+            "- For phrases with repetitive words, drop the redundant word.\n"
+            "- Must not match or be similar to the SECTIONTITLE.\n"
+            f"- {answer_limit_text}\n"
+            "Output the answers as a comma-separated list."
+        )
+        print(f"[DEBUG] Sending answer keywords prompt for page {page_index+1}:\n{prompt_answer}")
+        try:
+            messages = [{"role": "user", "content": prompt_answer}]
+            params = {"model": answer_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+            response = client.chat.completions.create(**params)
+            api_result = response.choices[0].message.content.strip()
+            print(f"[DEBUG] API Response for ANSWER keywords on page {page_index+1}: {api_result}")
+            raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
+            validated_answers = validate_and_replace_answers(page_index, raw_answers)
+            
+            # If a specific count was requested, limit the answers
+            if num_answers and len(validated_answers) > num_answers:
+                validated_answers = validated_answers[:num_answers]
+                
+            answer_array[page_index] = validated_answers
+            print(f"[DEBUG] Parsed ANSWER_ARRAY for page {page_index+1}: {answer_array[page_index]}")
+        except Exception as e:
+            print(f"[ERROR] Exception during answer keywords prompt for page {page_index+1}: {e}")
+
+        # Clue Generation Prompt
+        if page_index not in tab_data:
+            create_tab(page_index, "", page_text)
+        for answer in answer_array.get(page_index, []):
+            process_clue_for_answer(answer, page_index=page_index)
+        print(f"[DEBUG] Finished processing page {page_index + 1}.\n")
+
+# ------------------------ RESUBMIT FUNCTIONALITY ------------------------
+def show_resubmit_options():
+    """Creates a custom dialog to ask the user which resubmit option they want."""
+    result = {"option": 0}  # Default: Generate all new answers
+    
+    dialog = tk.Toplevel()
+    dialog.title("Resubmit Options")
+    dialog.geometry("400x200")
+    dialog.configure(bg="#2e2e2e")
+    dialog.grab_set()  # Make the dialog modal
+    
+    tk.Label(dialog, text="Choose an option for resubmission:", bg="#2e2e2e", fg="white").pack(pady=10)
+    
+    option_var = tk.IntVar(value=0)
+    tk.Radiobutton(dialog, text="Generate all new answers", variable=option_var, value=0, 
+                  bg="#2e2e2e", fg="white", selectcolor="#444").pack(anchor="w", padx=20)
+    tk.Radiobutton(dialog, text="Keep current answers but add more", variable=option_var, value=1, 
+                  bg="#2e2e2e", fg="white", selectcolor="#444").pack(anchor="w", padx=20)
+    tk.Radiobutton(dialog, text="Just generate new clues", variable=option_var, value=2, 
+                  bg="#2e2e2e", fg="white", selectcolor="#444").pack(anchor="w", padx=20)
+    
+    def on_ok():
+        result["option"] = option_var.get()
+        dialog.destroy()
+    
+    tk.Button(dialog, text="OK", command=on_ok, bg="#444", fg="white").pack(pady=20)
+    
+    # Center the dialog on the screen
+    dialog.update_idletasks()
+    width = dialog.winfo_width()
+    height = dialog.winfo_height()
+    x = (dialog.winfo_screenwidth() // 2) - (width // 2)
+    y = (dialog.winfo_screenheight() // 2) - (height // 2)
+    dialog.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+    
+    dialog.wait_window()
+    return result["option"]
+
+def resubmit_tab(page_index):
+    """
+    If the Resubmit checkbox for the given tab is enabled, prompt the user with three options:
+    1. Generate all new answers (replacing current ones)
+    2. Keep current answers but add more (append new answers)
+    3. Just generate new clues (keeping the same answers)
+    
+    Uses the Answer Model dropdown for new answer generation.
+    """
+    if page_index not in tab_data:
+        print(f"[ERROR] No tab found for page {page_index}.")
+        return
+    resubmit_var = tab_data[page_index].get("resubmit_var")
+    if resubmit_var and resubmit_var.get() == 1:
+        option = show_resubmit_options()
+        tree = tab_data[page_index]["treeview"]
+        
+        # Save current answers if we're not replacing them completely
+        current_answers = []
+        if option in [1, 2]:  # Keep current or just new clues
+            for item in tree.get_children():
+                values = tree.item(item, "values")
+                answer = values[5]  # Answer column is index 5
+                if answer not in current_answers:  # Ensure unique answers
+                    current_answers.append(answer)
+        
+        # Clear the tree if we're regenerating
+        tree.delete(*tree.get_children())
+        page_clue_types[page_index] = None
+        
+        if option in [0, 1]:  # Generate all new or add more
+            pdf_text = pdf_pages[page_index]
+            selected_model = answer_model_dropdown.get()
+            print(f"[DEBUG] Using model '{selected_model}' for Resubmit Answer Keywords.")
+            
+            # Adjust prompt based on the option
+            if option == 0:
+                prompt_desc = "Determine as many unique ANSWER key words/phrases as possible"
+            else:  # option == 1
+                exclude_list = ", ".join(current_answers)
+                prompt_desc = f"Determine additional unique ANSWER key words/phrases that are DIFFERENT from these existing ones: {exclude_list}"
+            
+            prompt = (
+                f"PDF Content:\n{pdf_text}\n\n"
+                f"{prompt_desc} from the PDF that meet these criteria:\n"
+                "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
+                "- May include spaces.\n"
+                "- No special characters, dashes, or punctuation.\n"
+                "- 25 characters or fewer.\n"
+                "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
+                "- For phrases with repetitive words, drop the redundant word.\n"
+                "- Must not match or be similar to the SECTIONTITLE.\n"
+                "Output the answers as a comma-separated list."
+            )
+            print(f"[DEBUG] Resubmit: Sending prompt for new answer keywords for page {page_index+1}:\n{prompt}")
+            
+            try:
+                messages = [{"role": "user", "content": prompt}]
+                params = {"model": selected_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+                response = client.chat.completions.create(**params)
+                api_result = response.choices[0].message.content.strip()
+                
+                # Get new answers as a list
+                new_raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
+                
+                # Filter out any duplicates of current answers before validation
+                if option == 1:  # Only for "add more" option
+                    new_raw_answers = [ans for ans in new_raw_answers if ans not in current_answers]
+                
+                # Validate the filtered list
+                new_answers = validate_and_replace_answers(page_index, new_raw_answers)
+                
+                # Final deduplication against current answers
+                if option == 1:
+                    # Only add answers that aren't already in current_answers
+                    final_new_answers = [ans for ans in new_answers if ans not in current_answers]
+                    combined_answers = current_answers + final_new_answers
+                    answer_array[page_index] = combined_answers
+                    print(f"[DEBUG] Resubmit: Added {len(final_new_answers)} new answers to {len(current_answers)} existing ones for page {page_index+1}")
+                else:
+                    answer_array[page_index] = new_answers
+                    print(f"[DEBUG] Resubmit: Generated {len(new_answers)} completely new answers for page {page_index+1}")
+                
+                # Generate clues for the answers
+                for answer in answer_array[page_index]:
+                    process_clue_for_answer(answer, page_index=page_index)
+                    
+            except Exception as e:
+                print(f"[ERROR] Exception during resubmit for new answers on page {page_index+1}: {e}")
+                
+        else:  # option == 2: Just generate new clues
+            answers = current_answers
+            answer_array[page_index] = answers
+            for answer in answers:
+                process_clue_for_answer(answer, page_index=page_index)
+                
+        print(f"[DEBUG] Tab {page_index + 1} re-populated with clues.")
+    else:
+        print(f"[DEBUG] Skipping tab {page_index + 1} as Resubmit is not enabled.")
+
+def resubmit_all_tabs():
+    for page_index in list(tab_data.keys()):
+        resubmit_tab(page_index)
+
+# ------------------------ DROPDOWN ARROW KEY HANDLING ------------------------
+def on_arrow_key_dropdown(event, dropdown):
+    values = dropdown['values']
+    if not values:
+        return "break"
+    current = dropdown.get()
+    try:
+        index = values.index(current)
+    except ValueError:
+        index = 0
+    if event.keysym == "Up":
+        new_index = (index - 1) % len(values)
+    elif event.keysym == "Down":
+        new_index = (index + 1) % len(values)
+    else:
+        return
+    dropdown.set(values[new_index])
+    # Manually update the corresponding model info label
+    if dropdown == section_model_dropdown:
+        update_section_model_info()
+    elif dropdown == answer_model_dropdown:
+        update_answer_model_info()
+    elif dropdown == clue_model_dropdown:
+        update_clue_model_info()
+    return "break"
+
+def regenerate_page(page_index):
+    """Re-runs all generation steps for the specified page."""
+    if page_index not in tab_data:
+        print(f"[ERROR] No tab found for page {page_index}.")
+        return
+        
+    if not pdf_pages or page_index >= len(pdf_pages):
+        print(f"[ERROR] No PDF content available for page {page_index+1}.")
+        return
+        
+    # Get the page text
+    page_text = pdf_pages[page_index]
+    
+    # Clear existing data for this page
+    tree = tab_data[page_index]["treeview"]
+    tree.delete(*tree.get_children())
+    if page_index in page_clue_types:
+        page_clue_types[page_index] = None
+        
+    # Determine how many answers to generate (if specified)
+    num_answers = answers_count_var.get()
+    try:
+        num_answers = int(num_answers)
+        if num_answers <= 0:
+            num_answers = None  # Default behavior
+    except (ValueError, TypeError):
+        num_answers = None  # Default behavior
+    
+    # 1. Section Info Prompt
+    section_model = section_model_dropdown.get()
+    print(f"[DEBUG] Using model '{section_model}' for Section Info.")
+    prompt_section = (
+        f"PDF Content:\n{page_text}\n\n"
+        "Determine SECTIONTITLE, SECTIONNUMBER, PAGENUMBER. "
+        "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
+    )
+    print(f"[DEBUG] Sending section info prompt for page {page_index+1}:\n{prompt_section}")
+    try:
+        messages = [{"role": "user", "content": prompt_section}]
+        params = {"model": section_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+        response = client.chat.completions.create(**params)
+        api_result = response.choices[0].message.content.strip()
+        print(f"[DEBUG] API Response for page {page_index+1}: {api_result}")
+        parts = api_result.split('|')
+        if len(parts) >= 3:
+            section_title[page_index] = parts[0].strip()
+            section_number[page_index] = parts[1].strip()
+            page_number[page_index] = validate_page_number(parts[2].strip())
+            print(f"[DEBUG] Parsed Section Info for page {page_index+1}: SECTIONTITLE='{section_title[page_index]}', SECTIONNUMBER='{section_number[page_index]}', PAGENUMBER='{page_number[page_index]}'")
+        else:
+            print(f"[ERROR] Unable to parse section info for page {page_index+1}.")
+    except Exception as e:
+        print(f"[ERROR] Exception during section info prompt for page {page_index+1}: {e}")
+
+    # 2. Answer Keywords Prompt
+    answer_model = answer_model_dropdown.get()
+    print(f"[DEBUG] Using model '{answer_model}' for Answer Keywords.")
+    answer_limit_text = f"Generate exactly {num_answers} answers." if num_answers else "Generate as many answers as appropriate."
+    prompt_answer = (
+        f"PDF Content:\n{page_text}\n\n"
+        f"Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
+        "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
+        "- May include spaces.\n"
+        "- No special characters, dashes, or punctuation.\n"
+        "- 25 characters or fewer.\n"
+        "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
+        "- For phrases with repetitive words, drop the redundant word.\n"
+        "- Must not match or be similar to the SECTIONTITLE.\n"
+        f"- {answer_limit_text}\n"
+        "Output the answers as a comma-separated list."
+    )
+    print(f"[DEBUG] Sending answer keywords prompt for page {page_index+1}:\n{prompt_answer}")
+    try:
+        messages = [{"role": "user", "content": prompt_answer}]
+        params = {"model": answer_model, "messages": messages, "max_completion_tokens": 4096, "stream": False}
+        response = client.chat.completions.create(**params)
+        api_result = response.choices[0].message.content.strip()
+        print(f"[DEBUG] API Response for ANSWER keywords on page {page_index+1}: {api_result}")
+        raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
+        validated_answers = validate_and_replace_answers(page_index, raw_answers)
+        
+        # If a specific count was requested, limit the answers
+        if num_answers and len(validated_answers) > num_answers:
+            validated_answers = validated_answers[:num_answers]
+            
+        answer_array[page_index] = validated_answers
+        print(f"[DEBUG] Parsed ANSWER_ARRAY for page {page_index+1}: {answer_array[page_index]}")
+    except Exception as e:
+        print(f"[ERROR] Exception during answer keywords prompt for page {page_index+1}: {e}")
+
+    # 3. Clue Generation
+    for answer in answer_array.get(page_index, []):
+        process_clue_for_answer(answer, page_index=page_index)
+    print(f"[DEBUG] Regenerated page {page_index + 1} with {len(answer_array.get(page_index, []))} answers.\n")
+    
+def show_context_menu(event, tree, page_index):
+    """Show context menu for right-clicked row."""
+    # Create a popup menu
+    popup_menu = tk.Menu(tree, tearoff=0, bg="#444", fg="white", activebackground="#555", activeforeground="white")
+    
+    # Add Select All and Deselect All options
+    popup_menu.add_command(
+        label="Select All", 
+        command=lambda: select_all_rows(tree, page_index, True)
+    )
+    popup_menu.add_command(
+        label="Deselect All", 
+        command=lambda: select_all_rows(tree, page_index, False)
+    )
+    
+    # Get selected rows
+    selected_items = [item for item in tree.get_children() if tab_data[page_index]["checkbox_states"].get(item, False)]
+    
+    if selected_items:  # If there are selected rows
+        popup_menu.add_separator()
+        popup_menu.add_command(
+            label=f"Delete Selected Rows ({len(selected_items)})", 
+            command=lambda: delete_selected_rows(tree, selected_items)
+        )
+        popup_menu.add_command(
+            label=f"Regenerate Selected Clues ({len(selected_items)})", 
+            command=lambda: regenerate_selected_clues(tree, selected_items, page_index)
+        )
+    
+    # Get the item ID for the clicked row
+    item_id = tree.identify_row(event.y)
+    if item_id and not selected_items:  # Clicked on a row and no rows are selected
+        popup_menu.add_separator()
+        # Add row-specific options
+        popup_menu.add_command(
+            label="Delete Row", 
+            command=lambda: delete_row(tree, item_id)
+        )
+        popup_menu.add_command(
+            label="Regenerate Clue", 
+            command=lambda: regenerate_clue_for_row(tree, item_id, page_index)
+        )
+    
+    # Display the popup menu
+    try:
+        popup_menu.tk_popup(event.x_root, event.y_root, 0)
+    finally:
+        popup_menu.grab_release()
+
+def delete_row(tree, item_id):
+    """Delete the selected row from the treeview."""
+    if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this row?"):
+        tree.delete(item_id)
+        print(f"[DEBUG] Deleted row {item_id}")
+
+def regenerate_clue_for_row(tree, item_id, page_index):
+    """Regenerate a clue for the selected row with the same answer and clue type."""
+    # Get the current values
+    values = tree.item(item_id, "values")
+    if not values or len(values) < 6:
+        return
+    
+    # Extract the answer (index 5) and clue type (index 3)
+    answer = values[5]
+    clue_type = values[3]
+    
+    # Delete the existing row
+    tree.delete(item_id)
+    
+    # Generate a new clue for this answer with the same clue type
+    print(f"[DEBUG] Regenerating clue for answer '{answer}' with clue type '{clue_type}'")
+    process_clue_for_answer(answer, page_index=page_index, specified_clue_type=clue_type)
+
+def select_all_rows(tree, page_index, select=True):
+    """Select or deselect all rows in the treeview."""
+    checkbox_states = tab_data[page_index]["checkbox_states"]
+    for item_id in tree.get_children():
+        checkbox_states[item_id] = select
+        tree.set(item_id, "Select", "✓" if select else "")
+
+def delete_selected_rows(tree, selected_items):
+    """Delete all selected rows from the treeview."""
+    if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete {len(selected_items)} selected rows?"):
+        for item_id in selected_items:
+            tree.delete(item_id)
+        print(f"[DEBUG] Deleted {len(selected_items)} rows")
+
+def regenerate_selected_clues(tree, selected_items, page_index):
+    """Regenerate clues for all selected rows with their same answers and clue types."""
+    for item_id in selected_items:
+        # Get the current values
+        values = tree.item(item_id, "values")
+        if not values or len(values) < 7:  # Ensure we have all columns
+            continue
+        
+        # Extract the answer (index 6) and clue type (index 4)
+        answer = values[6]  # Answer is in the last column
+        clue_type = values[4]  # ClueType is in the fifth column
+        
+        # Delete the existing row
+        tree.delete(item_id)
+        
+        # Generate a new clue for this answer with the same clue type
+        print(f"[DEBUG] Regenerating clue for answer '{answer}' with clue type '{clue_type}'")
+        process_clue_for_answer(answer, page_index=page_index, specified_clue_type=clue_type)
+    
+    print(f"[DEBUG] Regenerated clues for {len(selected_items)} rows")
+
+# ------------------------ HELPER FUNCTIONS ------------------------
+def validate_page_number(page_num_str):
+    """
+    Validates and cleans a page number string by removing the word 'page' (case-insensitive) if present.
+    Returns the cleaned page number string.
+    """
+    if not page_num_str:
+        return page_num_str
+    # Remove the word 'page' (case-insensitive) and any surrounding whitespace
+    cleaned = page_num_str.lower().replace('page', '').strip()
+    return cleaned.upper() if cleaned else page_num_str.strip()
+
+# ------------------------ BUILD THE GUI ------------------------
+root = tk.Tk()
+root.title("LLM One-Shot Prompt & Clue Generator")
+root.configure(bg="#2e2e2e")
+style = ttk.Style(root)
+style.theme_use("clam")
+style.configure("TButton", background="#444", foreground="white")
+style.configure("TLabel", background="#2e2e2e", foreground="white")
+
+# API Key & Main Model Selection Frame
+api_frame = tk.Frame(root, bg="#2e2e2e")
+api_frame.pack(pady=10, padx=10, fill=tk.X)
+tk.Label(api_frame, text="API Key File:", bg="#2e2e2e", fg="white").pack(side=tk.LEFT, padx=5)
+tk.Button(api_frame, text="Browse", command=browse_api_key, bg="#444", fg="white").pack(side=tk.LEFT, padx=5)
+api_key_label = tk.Label(api_frame, text="None selected", bg="#2e2e2e", fg="white")
+api_key_label.pack(side=tk.LEFT, padx=5)
+
+# Model Selection for Prompts Frame
+model_prompt_frame = tk.Frame(root, bg="#2e2e2e")
+model_prompt_frame.pack(pady=5, padx=10, fill=tk.X)
+
+# Section Model Dropdown
+section_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
+section_frame.pack(side=tk.LEFT, padx=5)
+tk.Label(section_frame, text="Section Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
+section_model_var = tk.StringVar()
+section_model_dropdown = ttk.Combobox(section_frame, textvariable=section_model_var, state="readonly")
+section_model_dropdown.pack(anchor="w")
+section_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, section_model_dropdown))
+section_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, section_model_dropdown))
+section_model_info_label = tk.Label(section_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
+section_model_info_label.pack(anchor="w")
+section_model_var.trace_add("write", lambda *args: update_section_model_info())
+
+# Answer Model Dropdown
+answer_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
+answer_frame.pack(side=tk.LEFT, padx=5)
+tk.Label(answer_frame, text="Answer Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
+answer_model_var = tk.StringVar()
+answer_model_dropdown = ttk.Combobox(answer_frame, textvariable=answer_model_var, state="readonly")
+answer_model_dropdown.pack(anchor="w")
+answer_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, answer_model_dropdown))
+answer_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, answer_model_dropdown))
+answer_model_info_label = tk.Label(answer_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
+answer_model_info_label.pack(anchor="w")
+answer_model_var.trace_add("write", lambda *args: update_answer_model_info())
+
+# Clue Model Dropdown
+clue_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
+clue_frame.pack(side=tk.LEFT, padx=5)
+tk.Label(clue_frame, text="Clue Model:", bg="#2e2e2e", fg="white").pack(anchor="w")
+clue_model_var = tk.StringVar()
+clue_model_dropdown = ttk.Combobox(clue_frame, textvariable=clue_model_var, state="readonly")
+clue_model_dropdown.pack(anchor="w")
+clue_model_dropdown.bind("<Up>", lambda e: on_arrow_key_dropdown(e, clue_model_dropdown))
+clue_model_dropdown.bind("<Down>", lambda e: on_arrow_key_dropdown(e, clue_model_dropdown))
+clue_model_info_label = tk.Label(clue_frame, text="Model details will appear here", bg="#2e2e2e", fg="white")
+clue_model_info_label.pack(anchor="w")
+clue_model_var.trace_add("write", lambda *args: update_clue_model_info())
+
+# Answers Count Control
+answers_frame = tk.Frame(model_prompt_frame, bg="#2e2e2e")
+answers_frame.pack(side=tk.LEFT, padx=5)
+tk.Label(answers_frame, text="Answers per page:", bg="#2e2e2e", fg="white").pack(anchor="w")
+answers_count_var = tk.StringVar(value="10")  # Default value 
+answers_count_entry = tk.Entry(answers_frame, textvariable=answers_count_var, width=5, bg="#444", fg="white")
+answers_count_entry.pack(anchor="w")
+tk.Label(answers_frame, text="(Leave empty for auto)", bg="#2e2e2e", fg="white", font=("Helvetica", 8)).pack(anchor="w")
+
+# PDF Browse Frame
+pdf_frame = tk.Frame(root, bg="#2e2e2e")
+pdf_frame.pack(pady=5, padx=10, anchor="w")
+tk.Button(pdf_frame, text="Browse PDF", command=browse_pdf, bg="#444", fg="white").pack(side=tk.LEFT, padx=5)
+pdf_filename_label = tk.Label(pdf_frame, text="No PDF selected", bg="#2e2e2e", fg="white")
+pdf_filename_label.pack(side=tk.LEFT, padx=5)
+
+# Process Buttons Frame
+buttons_frame = tk.Frame(root, bg="#2e2e2e")
+buttons_frame.pack(pady=2, padx=10, fill=tk.X)
+
+# Section Info Prompt Button
+tk.Button(buttons_frame, text="Determine Section Info", 
+          command=lambda: threading.Thread(target=run_section_info_prompt, daemon=True).start(),
+          bg="#444", fg="white").pack(pady=2, fill=tk.X)
+
+# Answer Keywords Prompt Button
+tk.Button(buttons_frame, text="Determine Answer Keywords", 
+          command=lambda: threading.Thread(target=run_answer_keywords_prompt, daemon=True).start(),
+          bg="#444", fg="white").pack(pady=2, fill=tk.X)
+
+# Clue Generation Prompt Button
+tk.Button(buttons_frame, text="Generate Clues for Answers", 
+          command=lambda: threading.Thread(target=run_remaining_prompts, daemon=True).start(),
+          bg="#444", fg="white").pack(pady=2, fill=tk.X)
+
+# Resubmit Button (Re-generate clues for tabs with Resubmit enabled)
+tk.Button(buttons_frame, text="Resubmit", 
+          command=lambda: threading.Thread(target=resubmit_all_tabs, daemon=True).start(),
+          bg="#444", fg="white").pack(pady=2, fill=tk.X)
+
+# Combined Prompts Button
+tk.Button(
+    buttons_frame,
+    text="Process All Prompts for Each Page",
+    command=lambda: threading.Thread(target=run_combined_prompts, daemon=True).start(),
+    bg="#444",
+    fg="white"
+).pack(pady=2, fill=tk.X)
+
+# Output Notebook (For displaying rows for each page)
+output_frame = tk.Frame(root, bg="#2e2e2e")
+output_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+output_notebook = ttk.Notebook(output_frame)
+output_notebook.pack(fill=tk.BOTH, expand=True)
+
+root.mainloop()

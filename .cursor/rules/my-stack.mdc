@@ -1,0 +1,14 @@
+---
+description: This is the project's tech stack / technology constraints
+globs: 
+alwaysApply: false
+---
+Technical Stack
+
+Python for backend.
+HTML/JS for frontend.
+node.js (server.js) for db connection.
+SQL databases (never JSON file storage); separate for dev, test, prod.
+Elasticsearch for search, hosted on elastic.co (dev and prod indexes).
+Python tests for verification.
+
