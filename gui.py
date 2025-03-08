@@ -1,4 +1,4 @@
-import tkinter as tk
+﻿import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import os
 import json
@@ -345,12 +345,6 @@ def preload_pdf(pdf_path):
     return load_pdf(pdf_path, use_dialog=False)
 
 # ------------------------ RESPONSE DISPLAY HANDLING ------------------------
-def clear_output_display():
-    for tab in output_notebook.tabs():
-        output_notebook.forget(tab)
-    tab_data.clear()
-    print("[DEBUG] Response display area cleared.")
-
 def create_tab(page_index, api_response, pdf_text):
     """Creates a new tab to display responses for a given page, with a working Resubmit checkbox."""
     global tab_data
@@ -459,54 +453,43 @@ def send_prompt(prompt, model_dropdown, max_tokens=4096):
         return None
 
 # ------------------------ PROMPT GENERATION HELPERS ------------------------
-def process_section_info(page_index, page_text):
-    """Helper function to process section info for a single page."""
+def process_page_metadata(page_index, page_text):
+    """Process both section info and answer keywords in a single API call."""
     prompt = (
         f"PDF Content:\n{page_text}\n\n"
-        "Determine SECTIONTITLE, SECTIONNUMBER, PAGENUMBER. "
-        "Output in format: SECTIONTITLE | SECTIONNUMBER | PAGENUMBER."
+        "Extract the following information from the PDF content:\n\n"
+        "1. SECTIONTITLE: The title of the section\n"
+        "2. SECTIONNUMBER: The section number\n"
+        "3. PAGENUMBER: The page number\n"
+        "4. ANSWERS: A list of 5-10 key words/phrases that meet these criteria:\n"
+        "   - Uppercase letters (A-Z) and numbers only\n"
+        "   - May include spaces\n"
+        "   - No special characters\n"
+        "   - 25 characters or fewer\n"
+        "   - Unique, concise, directly from document\n\n"
+        "Format your response exactly as follows:\n"
+        "SECTIONTITLE | SECTIONNUMBER | PAGENUMBER\n"
+        "ANSWER1, ANSWER2, ANSWER3, ..."
     )
-    print(f"[DEBUG] Sending section info prompt for page {page_index+1}:\n{prompt}")
     
     api_result = send_prompt(prompt, section_model_dropdown)
     if api_result:
-        print(f"[DEBUG] API Response for page {page_index+1}: {api_result}")
-        parts = api_result.split('|')
-        if len(parts) >= 3:
-            section_title[page_index] = parts[0].strip()
-            section_number[page_index] = parts[1].strip()
-            page_number[page_index] = parts[2].strip()
-            print(f"[DEBUG] Parsed Section Info for page {page_index+1}: SECTIONTITLE='{section_title[page_index]}', SECTIONNUMBER='{section_number[page_index]}', PAGENUMBER='{page_number[page_index]}'")
+        lines = api_result.strip().split('\n')
+        if len(lines) >= 2:
+            # Process section info
+            section_parts = lines[0].split('|')
+            if len(section_parts) >= 3:
+                section_title[page_index] = section_parts[0].strip()
+                section_number[page_index] = section_parts[1].strip()
+                page_number[page_index] = section_parts[2].strip()
+            
+            # Process answers
+            answer_line = lines[1]
+            raw_answers = [ans.strip().upper() for ans in answer_line.split(',') if ans.strip()]
+            validated_answers = validate_and_replace_answers(page_index, raw_answers)
+            answer_array[page_index] = validated_answers
+            
             return True
-        else:
-            print(f"[ERROR] Unable to parse section info for page {page_index+1}.")
-            return False
-    return False
-
-def process_answer_keywords(page_index, page_text):
-    """Helper function to process answer keywords for a single page."""
-    prompt = (
-        f"PDF Content:\n{page_text}\n\n"
-        "Determine the ANSWER key words/phrases from the PDF that meet these criteria:\n"
-        "- Contain only UPPERCASE letters (A-Z) and numbers if any.\n"
-        "- May include spaces.\n"
-        "- No special characters, dashes, or punctuation.\n"
-        "- 25 characters or fewer.\n"
-        "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
-        "- For phrases with repetitive words, drop the redundant word.\n"
-        "- Must not match or be similar to the SECTIONTITLE.\n"
-        "Output the answers as a comma-separated list."
-    )
-    print(f"[DEBUG] Sending answer keywords prompt for page {page_index+1}:\n{prompt}")
-    
-    api_result = send_prompt(prompt, answer_model_dropdown)
-    if api_result:
-        print(f"[DEBUG] API Response for ANSWER keywords on page {page_index+1}: {api_result}")
-        raw_answers = [ans.strip().upper() for ans in api_result.split(',') if ans.strip()]
-        validated_answers = validate_and_replace_answers(page_index, raw_answers)
-        answer_array[page_index] = validated_answers
-        print(f"[DEBUG] Parsed ANSWER_ARRAY for page {page_index+1}: {answer_array[page_index]}")
-        return True
     return False
 
 def process_clues(page_index):
@@ -520,74 +503,25 @@ def process_clues(page_index):
     print(f"[DEBUG] Last row populated for page {page_index + 1}.")
     return True
 
-# ------------------------ SECTION INFO PROMPT (Renamed) ------------------------
-def run_section_info_prompt():
-    """
-    For each page in the PDF, submits its content with instructions to determine SECTIONTITLE, SECTIONNUMBER, and PAGENUMBER.
-    The response is expected in a pipe-delimited format and stored in dictionaries keyed by page index.
-    Uses the Section Model dropdown.
-    """
-    global section_title, section_number, page_number
-    if not pdf_pages:
-        print("[ERROR] No PDF content available. Please load a PDF first.")
-        return
-    
-    for i, page_text in enumerate(pdf_pages):
-        process_section_info(i, page_text)
-
-# ------------------------ ANSWER KEYWORDS PROMPT (Renamed) ------------------------
-def run_answer_keywords_prompt():
-    """
-    For each page in the PDF, submits its content with instructions to determine ANSWER key words/phrases.
-    Converts all extracted answers to uppercase and ensures each answer is ≤ 25 characters.
-    Uses the Answer Model dropdown.
-    """
-    global answer_array
-    if not pdf_pages:
-        print("[ERROR] No PDF content available. Please load a PDF first.")
-        return
-    
-    for i, page_text in enumerate(pdf_pages):
-        process_answer_keywords(i, page_text)
-
-def run_remaining_prompts():
-    """
-    For each page that has answers in answer_array, cycles through its ANSWER_ARRAY.
-    For each answer, a clue is generated and a row is populated with:
-    SECTIONTITLE | SECTIONNUMBER | PAGENUMBER | CLUETYPE | CLUE | ANSWER.
-    After processing each page, prints a debug message indicating the last row has been populated.
-    """
-    if not answer_array:
-        print("[ERROR] answer_array is empty. Please run the answer keywords prompt first.")
-        return
-    for page_index in answer_array.keys():
-        process_clues(page_index)
-
 # ------------------------ COMBINED PROMPTS (All Steps) ------------------------
 def run_combined_prompts():
-    """
-    Processes each page sequentially:
-    1. Determines SECTIONTITLE, SECTIONNUMBER, PAGENUMBER using the Section Model.
-    2. Determines ANSWER key words/phrases using the Answer Model.
-    3. Generates clues for each answer using the Clue Model.
-    """
+    """Streamlined workflow processing all pages sequentially."""
     if not pdf_pages:
         print("[ERROR] No PDF content available. Please load a PDF first.")
         return
 
     for page_index, page_text in enumerate(pdf_pages):
-        # Section Info Prompt
-        process_section_info(page_index, page_text)
-        
-        # Answer Keywords Prompt
-        process_answer_keywords(page_index, page_text)
-        
-        # Clue Generation Prompt
-        if page_index not in tab_data:
-            create_tab(page_index, "", page_text)
-        process_clues(page_index)
-        
-        print(f"[DEBUG] Finished processing page {page_index + 1}.\n")
+        # Combined section info and answer extraction
+        if process_page_metadata(page_index, page_text):
+            # Create tab for displaying results
+            if page_index not in tab_data:
+                create_tab(page_index, "", page_text)
+            
+            # Generate clues for each answer
+            for answer in answer_array.get(page_index, []):
+                process_clue_for_answer(answer, page_index=page_index)
+            
+            print(f"[DEBUG] Finished processing page {page_index + 1}.\n")
 
 # ------------------------ RESUBMIT FUNCTIONALITY ------------------------
 def resubmit_tab(page_index):
