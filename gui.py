@@ -834,7 +834,7 @@ output_notebook.pack(fill=tk.BOTH, expand=True)
 # Function to initialize application with preselected API key
 def initialize_app():
     # Preselect API key file
-    api_key_path = ".\.APIkeys\API.OpenAI.txt"
+    api_key_path = "../.APIkeys/API.OpenAI.txt"
     if preselect_api_key(api_key_path):
         api_key_label.config(text=os.path.basename(api_key_path))
         # Load models after successful API key selection
