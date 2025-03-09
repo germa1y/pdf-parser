@@ -497,10 +497,17 @@ def run_combined_prompts():
         print("[ERROR] No PDF content available. Please load a PDF first.")
         return
 
+    # Clear existing tabs and data
+    for page_idx in list(tab_data.keys()):
+        if page_idx in tab_data:
+            tree = tab_data[page_idx]["treeview"]
+            tree.delete(*tree.get_children())  # Clear existing rows
+            page_clue_types[page_idx] = None  # Reset the clue type sequence
+
     for page_index, page_text in enumerate(pdf_pages):
         # Combined section info and answer extraction
         if process_page_metadata(page_index, page_text):
-            # Create tab for displaying results
+            # Create tab for displaying results or use existing tab
             if page_index not in tab_data:
                 create_tab(page_index, "", page_text)
             
@@ -611,6 +618,7 @@ def process_clue_for_answer(answer, page_index=0):
     and its description, then sends it to the API.
     Uses the Clue Model dropdown.
     ClueType 'Acrostic' is only allowed if the answer (excluding spaces) has 10 or fewer letters.
+    Enhanced to prevent answers from appearing in generated clues.
     """
     answer_length = len(answer.replace(" ", ""))
     while True:
@@ -621,31 +629,73 @@ def process_clue_for_answer(answer, page_index=0):
     clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
     pdf_text = pdf_pages[page_index] if pdf_pages and len(pdf_pages) > page_index else "Cached PDF Context"
     
+    # Enhanced prompt with explicit instructions not to include the answer
     prompt = (
         f"PDF Content:\n{pdf_text}\n\n"
         f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{clue_type}', '{clue_type_desc}'. "
+        "IMPORTANT: Your clue MUST NOT contain the answer itself or directly reveal it. "
+        "The clue should challenge the user to figure out the answer without explicitly mentioning it. "
         "Respond with a single line containing only the clue text. Do not include any labels or extra explanation."
     )
+    
+    # Add special instructions for problematic clue types
+    if clue_type == "Rebus":
+        prompt += " For this Rebus clue, do not include '= [ANSWER]' or any equation that shows the answer. Only provide the symbols/emojis."
+
     print(f"[DEBUG] Prompt for answer '{answer}' on page {page_index+1}:\n{prompt}")
     
-    api_result = send_prompt(prompt, clue_model_dropdown)
-    if api_result:
+    # Try up to 3 times to get a valid clue without the answer
+    max_attempts = 3
+    attempt = 0
+    valid_clue = False
+    api_result = None
+    
+    while attempt < max_attempts and not valid_clue:
+        api_result = send_prompt(prompt, clue_model_dropdown)
+        if not api_result:
+            error_msg = "Error generating clue"
+            print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}")
+            return error_msg
+            
+        # Clean up the response
         if api_result.lower().startswith("clue:"):
             api_result = api_result[len("clue:"):].strip()
         api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
-        print(f"[DEBUG] API Response for answer '{answer}' on page {page_index+1}: {api_result}")
-        if page_index not in tab_data:
-            create_tab(page_index, "", pdf_text)
-        tree = tab_data[page_index]["treeview"]
-        tree.insert("", "end", values=(section_title.get(page_index, ""), 
-                                       section_number.get(page_index, ""), 
-                                       page_number.get(page_index, ""), 
-                                       clue_type, api_result, answer))
-        return api_result
-    else:
-        error_msg = "Error generating clue"
-        print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}")
-        return error_msg
+        
+        # Check if the answer is directly in the clue (case insensitive)
+        if answer.lower() not in api_result.lower():
+            valid_clue = True
+        else:
+            attempt += 1
+            print(f"[WARNING] Answer '{answer}' found in clue. Retrying with stronger instructions (Attempt {attempt}/{max_attempts})")
+            
+            # Create a stronger prompt for the retry
+            prompt = (
+                f"Generate a challenging clue for '{answer}' using clue type '{clue_type}'. "
+                f"CRITICAL REQUIREMENT: The clue MUST NOT contain '{answer}' or directly reveal it. "
+                f"Previous attempt failed because it revealed the answer. "
+                f"Respond with only the clue text without labels or explanation."
+            )
+            
+            # Add even more specific instructions for problematic clue types
+            if clue_type == "Rebus":
+                prompt += f" Use only symbols and emojis that suggest the concept without spelling out '{answer}' or including '= {answer}'."
+    
+    # If we still have the answer in the clue after all attempts, add a warning note
+    if not valid_clue and api_result:
+        api_result = f"[NEEDS REVIEW - Answer may be revealed] {api_result}"
+    
+    print(f"[DEBUG] API Response for answer '{answer}' on page {page_index+1}: {api_result}")
+    
+    # Update the UI with the result
+    if page_index not in tab_data:
+        create_tab(page_index, "", pdf_text)
+    tree = tab_data[page_index]["treeview"]
+    tree.insert("", "end", values=(section_title.get(page_index, ""), 
+                                   section_number.get(page_index, ""), 
+                                   page_number.get(page_index, ""), 
+                                   clue_type, api_result, answer))
+    return api_result
 
 # ------------------------ BUILD THE GUI ------------------------
 root = tk.Tk()
