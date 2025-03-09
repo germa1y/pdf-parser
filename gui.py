@@ -31,16 +31,15 @@ answer_array = {}
 CLUE_TYPES = [
     "Definition", "Synonym", "Fill-in-the-Blank", "Anagram", "Abbreviation",
     "Charade", "Homophone", "Hidden Word", "Cryptic", "Question",
-    "Double Definition", "Acrostic", "Pun", "Cross-Reference",
-    "Metaphor/Simile", "Rebus", "Visual"
+    "Double Definition", "Acrostic", "Pun", "Metaphor/Simile", "Rebus"
 ]
 
 CLUE_TYPE_DESC = {
     "Definition": "Direct definition.",
     "Synonym": "Word(s) with similar meaning.",
     "Fill-in-the-Blank": "Sentence with a blank to be filled.",
-    "Anagram": "Clue indicates a scrambled word (e.g., 'scrambled,' 'rearranged').",
-    "Abbreviation": "Clue hints at an acronym or abbreviation.",
+    "Anagram": "Clue signals a word that has been scrambled (e.g., 'rearranged,' 'mixed up') and should be unscrambled to find the answer.",
+    "Abbreviation": "Clue suggests a condensed or shortened form, requiring interpretation to find the full meaning.",
     "Charade": "Clue formed by combining parts or meanings.",
     "Homophone": "Clue indicates a word sounds like another.",
     "Hidden Word": "Word embedded in the clue sentence (without capitalization hints; avoid all caps).",
@@ -49,16 +48,13 @@ CLUE_TYPE_DESC = {
     "Double Definition": "A single clue provides two different definitions for the same word.",
     "Acrostic": "The first letters of each word in the sentence spell the answer.",
     "Pun": "Use puns for humor or trickery.",
-    "Cross-Reference": "Refer to another clue or answer in the puzzle.",
     "Metaphor/Simile": "Use figurative language.",
-    "Rebus": "Involve letters, numbers, or symbols arranged to depict words or phrases.",
-    "Visual": ("Clues rely on the shape or arrangement of symbolic typefaces "
-               "(Wingdings, Webdings, Zapf Dingbats, Dingbats, Entypo, FontAwesome, "
+    "Rebus": "Clue uses numbers, symbols, emojis, or pictograms (Wingdings, Webdings, Zapf Dingbats, Dingbats, Entypo, FontAwesome, "
                "Material Icons, Octicons, Noto Emoji, EmojiOne (JoyPixels), Twemoji, "
                "Apple Color Emoji, Segoe UI Emoji, Bravura, Petrucci, Opus, Maestro, "
                "Musical Symbols Unicode, Symbol, Cambria Math, STIX Two Math, Asana Math, "
                "TeX Gyre Termes Math, ISO Technical Symbols, MT Extra, Lucida Math, AstroGadget, "
-               "AstroSymbols, Alchemy Symbols, Runic Unicode).")
+               "AstroSymbols, Alchemy Symbols, Runic Unicode) creatively arranged to represent words or phrases without directly spelling them out.",
 }
 
 # Dictionary to hold per-page randomized clue types
@@ -188,10 +184,10 @@ def retrieve_models():
             return
         # Set dropdown values for all three prompt types with defaults:
         content_model_dropdown['values'] = available_models
-        content_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        content_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
         
         clue_model_dropdown['values'] = available_models
-        clue_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        clue_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
         
         # Update model info labels explicitly on initialization.
         update_model_info('content')
@@ -398,7 +394,8 @@ def validate_and_replace_answers(page_index, answers):
             "1. Only uppercase letters (A-Z), numbers (0-9), and spaces allowed\n"
             "2. No special characters\n"
             "3. Maximum 25 characters\n"
-            "4. Must be a coherent term or phrase\n\n"
+            "4. Must be a coherent term or phrase\n"
+            "5. STRONGLY PREFER single words over phrases when possible\n\n"
             "Provide a valid answer that is as close as possible to the original, "
             "following all rules. If the original requires minimal or no changes, keep it as is.\n"
             "Respond with the valid answer only, no explanation."
@@ -455,7 +452,8 @@ def process_page_metadata(page_index, page_text):
         "   - May include spaces\n"
         "   - No special characters\n"
         "   - 25 characters or fewer\n"
-        "   - Unique, concise, directly from document\n\n"
+        "   - Unique, concise, directly from document\n"
+        "   - STRONGLY PREFER single words over phrases when possible\n\n"
         "Format your response exactly as follows:\n"
         "SECTIONTITLE | SECTIONNUMBER | PAGENUMBER\n"
         "ANSWER1, ANSWER2, ANSWER3, ..."
@@ -543,7 +541,8 @@ def resubmit_tab(page_index):
                 "- 25 characters or fewer.\n"
                 "- All answers must be UNIQUE, concise, and directly sourced from the document.\n"
                 "- For phrases with repetitive words, drop the redundant word.\n"
-                "- Must not match or be similar to the SECTIONTITLE.\n"
+                "- STRONGLY PREFER single words over phrases when possible.\n"
+                "- ANSWER must not match or be similar to the SECTIONTITLE.\n"
                 "Output the answers as a comma-separated list."
             )
             print(f"[DEBUG] Resubmit: Sending prompt for new answer keywords for page {page_index+1}:\n{prompt}")
