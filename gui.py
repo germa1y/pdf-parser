@@ -9,13 +9,19 @@ from datetime import datetime
 import random
 from openai import OpenAI
 from PyPDF2 import PdfReader
+import re
 
 # ------------------------ GLOBAL VARIABLES ------------------------
+# API Client (Global)
+client = None
 selected_api_key = None
 selected_api_key_path = None
+
+# Model information dictionary - populated from model_info.json if available
 MODEL_INFO = {}
-client = None  # OpenAI client instance
-pdf_pages = []  # Cached PDF page texts
+
+# Global variables to hold PDF content
+pdf_pages = []
 tab_data = {}   # Holds data for each page tab
 last_api_key_dir = None
 
@@ -182,9 +188,9 @@ def retrieve_models():
         if not available_models:
             messagebox.showinfo("Info", "No models found for the selected API key.")
             return
-        # Set dropdown values for all three prompt types with defaults:
+        # Set dropdown values for all prompt types with defaults:
         content_model_dropdown['values'] = available_models
-        content_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
+        content_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
         
         clue_model_dropdown['values'] = available_models
         clue_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
@@ -243,13 +249,10 @@ def update_model_info(model_type, *args):
         input_price = details.get("input_price", "N/A")
         output_price = details.get("output_price", "N/A")
         context_size = details.get("context_size", "N/A")
-        is_new = details.get("new_model", False)
         model_info_text = f"Input: ${input_price} | Output: ${output_price} | Context: {context_size}"
         
-        if is_new:
-            info_label.config(text=model_info_text, font=("Helvetica", 10, "bold"), fg="green")
-        else:
-            info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
+        # Apply standard formatting for all models
+        info_label.config(text=model_info_text, font=("Helvetica", 10, "normal"), fg="white")
     else:
         info_label.config(text="No info available for this model.", font=("Helvetica", 10, "italic"), fg="red")
 
@@ -401,7 +404,7 @@ def validate_and_replace_answers(page_index, answers):
             "Respond with the valid answer only, no explanation."
         )
         
-        api_result = send_prompt(prompt, content_model_dropdown, max_tokens=100)
+        api_result = send_prompt(prompt, content_model_dropdown)
         if api_result:
             valid_answers.append(api_result.strip().upper())
         else:
@@ -409,33 +412,45 @@ def validate_and_replace_answers(page_index, answers):
     return valid_answers
 
 # ------------------------ API PROMPT HANDLING ------------------------
-def send_prompt(prompt, model_dropdown, max_tokens=4096):
+def send_prompt(prompt, model_dropdown):
     """
     Send a prompt to the OpenAI API using the specified model dropdown.
     
     Args:
         prompt (str): The prompt to send to the API
         model_dropdown (ttk.Combobox): The dropdown widget containing the model selection
-        max_tokens (int): Maximum tokens for completion
         
     Returns:
         str: The API response text or None if an error occurred
     """
     selected_model = model_dropdown.get()
-    print(f"[DEBUG] Using model '{selected_model}' for API request.")
+    print(f"[DEBUG] Using model '{selected_model}' for API request")
     
     try:
         messages = [{"role": "user", "content": prompt}]
         params = {
             "model": selected_model, 
-            "messages": messages, 
-            "max_completion_tokens": max_tokens, 
+            "messages": messages,
             "stream": False
         }
+        
+        # Start API request timer
+        start_time = time.time()
         response = client.chat.completions.create(**params)
+        elapsed_time = time.time() - start_time
+        
+        # Log successful request with timing
+        print(f"[DEBUG] API request completed in {elapsed_time:.2f} seconds")
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[ERROR] Exception during API request: {e}")
+        print(f"[ERROR] Exception during API request: {str(e)}")
+        # For OpenAI errors, try to get more details
+        if hasattr(e, 'response') and hasattr(e.response, 'json'):
+            try:
+                error_details = e.response.json()
+                print(f"[ERROR] API error details: {error_details}")
+            except:
+                pass
         return None
 
 # ------------------------ PROMPT GENERATION HELPERS ------------------------
@@ -447,7 +462,7 @@ def process_page_metadata(page_index, page_text):
         "1. SECTIONTITLE: The title of the section\n"
         "2. SECTIONNUMBER: The section number\n"
         "3. PAGENUMBER: The page number\n"
-        "4. ANSWERS: A list of 5-10 key words/phrases that meet these criteria:\n"
+        "4. ANSWERS: A list of all key words/phrases that meet these criteria:\n"
         "   - Uppercase letters (A-Z) and numbers only\n"
         "   - May include spaces\n"
         "   - No special characters\n"
@@ -480,14 +495,17 @@ def process_page_metadata(page_index, page_text):
     return False
 
 def process_clues(page_index):
-    """Helper function to process clues for all answers on a single page."""
+    """
+    Helper function to process clues for all answers on a single page.
+    Generates clues for each answer using all available ClueTypes.
+    """
     if page_index not in answer_array or not answer_array[page_index]:
         print(f"[ERROR] No answers available for page {page_index+1}.")
         return False
         
     for answer in answer_array[page_index]:
         process_clue_for_answer(answer, page_index=page_index)
-    print(f"[DEBUG] Last row populated for page {page_index + 1}.")
+    print(f"[DEBUG] Generated clues for all answers on page {page_index + 1}.")
     return True
 
 # ------------------------ COMBINED PROMPTS (All Steps) ------------------------
@@ -524,6 +542,7 @@ def resubmit_tab(page_index):
     (with a new, expanded set of answer keywords) or keep the same answers, then re-run process_clue_for_answer
     for each answer accordingly.
     Uses the Answer Model dropdown for new answer generation.
+    Each answer will have clues for all available ClueTypes.
     """
     if page_index not in tab_data:
         print(f"[ERROR] No tab found for page {page_index}.")
@@ -612,90 +631,167 @@ def get_next_clue_type(page_index=0):
         page_clue_types[page_index] = shuffled
     return page_clue_types[page_index].pop(0)
 
-def process_clue_for_answer(answer, page_index=0):
+def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
     """
-    Builds the prompt to generate a clue for the given answer using a randomized CLUETYPE
-    and its description, then sends it to the API.
+    Builds a prompt to generate clues for the given answer using ALL available CLUETYPES
+    or a specified ClueType if provided, then sends a single API call to get all responses.
     Uses the Clue Model dropdown.
     ClueType 'Acrostic' is only allowed if the answer (excluding spaces) has 10 or fewer letters.
     Enhanced to prevent answers from appearing in generated clues.
+    Now with detailed debugging for batch processing.
     """
     answer_length = len(answer.replace(" ", ""))
-    while True:
-        clue_type = get_next_clue_type(page_index)
-        if clue_type == "Acrostic" and answer_length > 10:
-            continue
-        break
-    clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
     pdf_text = pdf_pages[page_index] if pdf_pages and len(pdf_pages) > page_index else "Cached PDF Context"
     
-    # Enhanced prompt with explicit instructions not to include the answer
-    prompt = (
-        f"PDF Content:\n{pdf_text}\n\n"
-        f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{clue_type}', '{clue_type_desc}'. "
-        "IMPORTANT: Your clue MUST NOT contain the answer itself or directly reveal it. "
-        "The clue should challenge the user to figure out the answer without explicitly mentioning it. "
-        "Respond with a single line containing only the clue text. Do not include any labels or extra explanation."
-    )
-    
-    # Add special instructions for problematic clue types
-    if clue_type == "Rebus":
-        prompt += " For this Rebus clue, do not include '= [ANSWER]' or any equation that shows the answer. Only provide the symbols/emojis."
-
-    print(f"[DEBUG] Prompt for answer '{answer}' on page {page_index+1}:\n{prompt}")
-    
-    # Try up to 3 times to get a valid clue without the answer
-    max_attempts = 3
-    attempt = 0
-    valid_clue = False
-    api_result = None
-    
-    while attempt < max_attempts and not valid_clue:
-        api_result = send_prompt(prompt, clue_model_dropdown)
-        if not api_result:
-            error_msg = "Error generating clue"
-            print(f"[ERROR] Failed to generate clue for answer '{answer}' on page {page_index+1}")
-            return error_msg
-            
-        # Clean up the response
-        if api_result.lower().startswith("clue:"):
-            api_result = api_result[len("clue:"):].strip()
-        api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
-        
-        # Check if the answer is directly in the clue (case insensitive)
-        if answer.lower() not in api_result.lower():
-            valid_clue = True
-        else:
-            attempt += 1
-            print(f"[WARNING] Answer '{answer}' found in clue. Retrying with stronger instructions (Attempt {attempt}/{max_attempts})")
-            
-            # Create a stronger prompt for the retry
-            prompt = (
-                f"Generate a challenging clue for '{answer}' using clue type '{clue_type}'. "
-                f"CRITICAL REQUIREMENT: The clue MUST NOT contain '{answer}' or directly reveal it. "
-                f"Previous attempt failed because it revealed the answer. "
-                f"Respond with only the clue text without labels or explanation."
-            )
-            
-            # Add even more specific instructions for problematic clue types
-            if clue_type == "Rebus":
-                prompt += f" Use only symbols and emojis that suggest the concept without spelling out '{answer}' or including '= {answer}'."
-    
-    # If we still have the answer in the clue after all attempts, add a warning note
-    if not valid_clue and api_result:
-        api_result = f"[NEEDS REVIEW - Answer may be revealed] {api_result}"
-    
-    print(f"[DEBUG] API Response for answer '{answer}' on page {page_index+1}: {api_result}")
-    
-    # Update the UI with the result
+    # Create tab if it doesn't exist
     if page_index not in tab_data:
         create_tab(page_index, "", pdf_text)
     tree = tab_data[page_index]["treeview"]
-    tree.insert("", "end", values=(section_title.get(page_index, ""), 
-                                   section_number.get(page_index, ""), 
-                                   page_number.get(page_index, ""), 
-                                   clue_type, api_result, answer))
-    return api_result
+    
+    # For debugging: Get the selected model
+    selected_model = clue_model_dropdown.get()
+    print(f"[DEBUG] Current selected model for clue generation: '{selected_model}'")
+    
+    # If a specific clue type is provided, only process that one
+    if specified_clue_type:
+        clue_types_to_process = [specified_clue_type]
+        
+        # Skip if Acrostic is specified but answer is too long
+        if specified_clue_type == "Acrostic" and answer_length > 10:
+            print(f"[WARNING] Acrostic not suitable for answer '{answer}' (too long). Skipping.")
+            return False
+            
+        # Process single clue type with existing method
+        clue_type_desc = CLUE_TYPE_DESC.get(specified_clue_type, "")
+        prompt = (
+            f"PDF Content:\n{pdf_text}\n\n"
+            f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{specified_clue_type}', '{clue_type_desc}'. "
+            "IMPORTANT: Your clue MUST NOT contain the answer itself or directly reveal it. "
+            "The clue should challenge the user to figure out the answer without explicitly mentioning it. "
+            "Respond with a single line containing only the clue text. Do not include any labels or explanation."
+        )
+        
+        # Add special instructions for problematic clue types
+        if specified_clue_type == "Rebus":
+            prompt += " For this Rebus clue, do not include '= [ANSWER]' or any equation that shows the answer. Only provide the symbols/emojis."
+
+        print(f"[DEBUG] Prompt for answer '{answer}' with clue type '{specified_clue_type}' on page {page_index+1}")
+        
+        api_result = send_prompt(prompt, clue_model_dropdown)
+        if api_result:
+            # Clean up the response
+            if api_result.lower().startswith("clue:"):
+                api_result = api_result[len("clue:"):].strip()
+            api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
+            
+            # Check if answer is in clue
+            if answer.lower() in api_result.lower():
+                api_result = f"[NEEDS REVIEW - Answer may be revealed] {api_result}"
+                
+            # Insert into tree
+            tree.insert("", "end", values=(section_title.get(page_index, ""), 
+                                          section_number.get(page_index, ""), 
+                                          page_number.get(page_index, ""), 
+                                          specified_clue_type, api_result, answer))
+        return True
+    
+    # For all clue types, make a single batched API call
+    # Filter out Acrostic if answer is too long
+    clue_types_to_process = [ct for ct in CLUE_TYPES if not (ct == "Acrostic" and answer_length > 10)]
+    print(f"[DEBUG] Processing these clue types for '{answer}': {clue_types_to_process}")
+    
+    # Build a comprehensive prompt requesting all clue types at once
+    clue_type_requests = []
+    for clue_type in clue_types_to_process:
+        clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
+        clue_type_requests.append(f"Clue Type: {clue_type}\nDescription: {clue_type_desc}")
+    
+    all_clue_types_text = "\n\n".join(clue_type_requests)
+    
+    # Create a simpler prompt for better batch processing
+    prompt = (
+        f"ANSWER: '{answer}'\n\n"
+        f"TASK: Generate one unique clue for each of the following clue types:\n\n"
+        f"{all_clue_types_text}\n\n"
+        "FORMAT REQUIREMENTS:\n"
+        "1. Format each clue as: '[ClueType] Clue text'\n"
+        "2. Respond with a numbered list, one clue per line\n"
+        "3. Be concise - clues should be under 15 words each\n"
+        "4. Do NOT include the answer word in any clue\n\n"
+        "EXAMPLE RESPONSE FORMAT:\n"
+        "1. [Definition] Brief definition clue here\n"
+        "2. [Synonym] Brief synonym clue here\n"
+        "And so on for each clue type."
+    )
+    
+    # Add truncated PDF context at the end to avoid overweighting it
+    simplified_pdf = pdf_text[:300] + "..." if len(pdf_text) > 300 else pdf_text
+    prompt += f"\n\nCONTEXT (for reference):\n{simplified_pdf}"
+    
+    print(f"[DEBUG] Making batch request for all clue types for answer '{answer}' on page {page_index+1}")
+    print(f"[DEBUG] Prompt length: {len(prompt)} characters")
+    
+    # Make a single API call for all clue types without token limitation
+    api_result = send_prompt(prompt, clue_model_dropdown)
+    
+    # Check if we got a valid response
+    if api_result and len(api_result.strip()) > 0:
+        print(f"[DEBUG] Received batch response of {len(api_result)} characters")
+        # Parse the results to extract individual clues
+        # Expected format: "[ClueType] Clue text" or "1. [ClueType] Clue text"
+        clue_lines = api_result.strip().split('\n')
+        print(f"[DEBUG] Response contains {len(clue_lines)} lines")
+        
+        clues_processed = 0
+        for line in clue_lines:
+            # Skip empty lines
+            if not line.strip():
+                continue
+                
+            print(f"[DEBUG] Processing line: {line[:50]}..." if len(line) > 50 else f"[DEBUG] Processing line: {line}")
+                
+            # Remove numbering if present (e.g., "1. [ClueType] Clue text")
+            if re.match(r'^\d+\.', line):
+                line = re.sub(r'^\d+\.\s*', '', line)
+            
+            # Extract clue type and text using regex
+            match = re.match(r'\[([^\]]+)\](.*)', line)
+            if match:
+                clue_type = match.group(1).strip()
+                clue_text = match.group(2).strip()
+                
+                print(f"[DEBUG] Extracted clue type: '{clue_type}', clue text: '{clue_text[:30]}...'")
+                
+                # Verify clue type is valid
+                if clue_type in CLUE_TYPES:
+                    clues_processed += 1
+                    # Check if answer is in clue
+                    if answer.lower() in clue_text.lower():
+                        clue_text = f"[NEEDS REVIEW - Answer may be revealed] {clue_text}"
+                    
+                    # Insert into tree
+                    tree.insert("", "end", values=(section_title.get(page_index, ""), 
+                                                  section_number.get(page_index, ""), 
+                                                  page_number.get(page_index, ""), 
+                                                  clue_type, clue_text, answer))
+                else:
+                    print(f"[WARNING] Invalid clue type '{clue_type}' in response for answer '{answer}'")
+            else:
+                print(f"[WARNING] Could not parse line: '{line}'")
+        
+        # If we successfully processed clues, return
+        if clues_processed > 0:
+            print(f"[DEBUG] Successfully processed {clues_processed} clues for answer '{answer}' in batch mode")
+            return True
+        else:
+            print(f"[ERROR] Batch API call succeeded but no valid clues found. Response format may be incorrect.")
+            # Print the first part of the API response for debugging
+            print(f"[DEBUG] First 300 chars of response: {api_result[:300]}...")
+            return False
+    else:
+        # Detailed error information when batch fails
+        print(f"[ERROR] Batch API call failed for answer '{answer}'. No response received.")
+        return False
 
 # ------------------------ BUILD THE GUI ------------------------
 root = tk.Tk()
@@ -789,7 +885,7 @@ def initialize_app():
         load_model_info()
     
     # Preload default PDF file
-    pdf_path = ".\EH200-1.pdf"
+    pdf_path = "./EH200-1.pdf"
     if not preload_pdf(pdf_path):
         print(f"[WARNING] Failed to preload default PDF file: {pdf_path}")
 
