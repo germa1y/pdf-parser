@@ -33,11 +33,14 @@ page_number = {}
 # Answer keywords dictionary (set by answer prompt) per page index
 answer_array = {}
 
+# Global setting for reviewing answers before generating clues
+review_answers_enabled = True
+
 # Clue types and their descriptions
 CLUE_TYPES = [
     "Definition", "Synonym", "Fill-in-the-Blank", "Anagram", "Abbreviation",
     "Charade", "Homophone", "Hidden Word", "Cryptic", "Question",
-    "Double Definition", "Acrostic", "Pun", "Metaphor/Simile", "Rebus"
+    "Double Definition", "Acrostic", "Pun", "Metaphor/Simile", "Verbatim", "Rebus",
 ]
 
 CLUE_TYPE_DESC = {
@@ -55,6 +58,7 @@ CLUE_TYPE_DESC = {
     "Acrostic": "The first letters of each word in the sentence spell the answer.",
     "Pun": "Use puns for humor or trickery.",
     "Metaphor/Simile": "Use figurative language.",
+    "Verbatim": "Clue uses the exact wording from the source document.",
     "Rebus": "Clue uses numbers, symbols, emojis, or pictograms (Wingdings, Webdings, Zapf Dingbats, Dingbats, Entypo, FontAwesome, "
                "Material Icons, Octicons, Noto Emoji, EmojiOne (JoyPixels), Twemoji, "
                "Apple Color Emoji, Segoe UI Emoji, Bravura, Petrucci, Opus, Maestro, "
@@ -190,7 +194,7 @@ def retrieve_models():
             return
         # Set dropdown values for all prompt types with defaults:
         content_model_dropdown['values'] = available_models
-        content_model_dropdown.set("gpt-3.5-turbo" if "gpt-3.5-turbo" in available_models else available_models[0])
+        content_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
         
         clue_model_dropdown['values'] = available_models
         clue_model_dropdown.set("gpt-4o-mini" if "gpt-4o-mini" in available_models else available_models[0])
@@ -411,6 +415,86 @@ def validate_and_replace_answers(page_index, answers):
             print(f"[ERROR] Exception during re-generation for an answer on page {page_index+1}")
     return valid_answers
 
+def review_answers(page_index, answers):
+    """
+    Presents each answer to the user for review, allowing them to accept, edit, or delete.
+    Returns a list of approved answers.
+    """
+    approved_answers = []
+    
+    # Create a modal dialog box
+    review_dialog = tk.Toplevel()
+    review_dialog.title(f"Review Answers - Page {page_index + 1}")
+    review_dialog.geometry("500x400")
+    review_dialog.transient(root)  # Set as modal dialog
+    review_dialog.grab_set()  # Make dialog modal
+    
+    # Add instructions
+    tk.Label(review_dialog, text="Review each answer. Accept, edit, or delete as needed.", 
+             wraplength=480, justify="left", pady=10).pack(fill="x")
+    
+    # Create a frame to hold the answers list
+    answers_frame = tk.Frame(review_dialog)
+    answers_frame.pack(fill="both", expand=True, padx=10, pady=5)
+    
+    # Create scrollable canvas for potentially long lists
+    canvas = tk.Canvas(answers_frame)
+    scrollbar = tk.Scrollbar(answers_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Add each answer as an entry with accept/delete buttons
+    answer_entries = []
+    for i, answer in enumerate(answers):
+        frame = tk.Frame(scrollable_frame)
+        frame.pack(fill="x", pady=5)
+        
+        # Label
+        tk.Label(frame, text=f"Answer {i+1}:").pack(side="left", padx=5)
+        
+        # Entry field with answer
+        entry = tk.Entry(frame, width=30)
+        entry.insert(0, answer)
+        entry.pack(side="left", padx=5, fill="x", expand=True)
+        answer_entries.append(entry)
+        
+        # Delete button
+        delete_btn = tk.Button(frame, text="Delete", 
+                              command=lambda e=entry: e.delete(0, tk.END))
+        delete_btn.pack(side="right", padx=5)
+    
+    # Function to collect all non-empty entries when done
+    def collect_answers():
+        nonlocal approved_answers
+        approved_answers = [entry.get().strip().upper() for entry in answer_entries 
+                          if entry.get().strip()]
+        review_dialog.destroy()
+    
+    # Add buttons at the bottom
+    buttons_frame = tk.Frame(review_dialog)
+    buttons_frame.pack(fill="x", pady=10)
+    
+    tk.Button(buttons_frame, text="Cancel", 
+             command=lambda: review_dialog.destroy()).pack(side="left", padx=10)
+    
+    tk.Button(buttons_frame, text="Accept All", 
+             command=collect_answers).pack(side="right", padx=10)
+    
+    # Wait for the dialog to be closed
+    review_dialog.wait_window()
+    
+    return approved_answers
+
 # ------------------------ API PROMPT HANDLING ------------------------
 def send_prompt(prompt, model_dropdown):
     """
@@ -489,7 +573,17 @@ def process_page_metadata(page_index, page_text):
             answer_line = lines[1]
             raw_answers = [ans.strip().upper() for ans in answer_line.split(',') if ans.strip()]
             validated_answers = validate_and_replace_answers(page_index, raw_answers)
-            answer_array[page_index] = validated_answers
+            
+            # Store the validated answers
+            final_answers = validated_answers
+            
+            # Allow user to review, edit, or delete answers if enabled
+            if review_answers_enabled:
+                print(f"[DEBUG] Reviewing answers for page {page_index+1}")
+                final_answers = review_answers(page_index, validated_answers)
+            
+            # Store the final answers
+            answer_array[page_index] = final_answers
             
             return True
     return False
@@ -754,17 +848,17 @@ def process_clue_for_answer(answer, page_index=0, specified_clue_type=None, max_
             "FORMAT REQUIREMENTS:\n"
             "1. Format each clue as: '[ClueType] Clue text'\n"
             "2. Respond with a numbered list, one clue per line\n"
-            "3. Be concise - clues should be under 15 words each\n"
-            f"4. IMPORTANT: Do NOT include the answer word '{answer}' or any variation of it in any clue\n\n"
+            "3. ENSURE clues reflect the source document accurately and concisely\n"
+            "4. Avoid capitalization of acronym cluetype letters in the clue as it gives away the answer\n"
+            f"5. IMPORTANT: Do NOT include the answer word '{answer}' or any variation of it in any clue\n\n"
             "EXAMPLE RESPONSE FORMAT:\n"
             "1. [Definition] Brief definition clue here\n"
             "2. [Synonym] Brief synonym clue here\n"
             "And so on for each clue type."
         )
         
-        # Add truncated PDF context at the end to avoid overweighting it
-        simplified_pdf = pdf_text[:300] + "..." if len(pdf_text) > 300 else pdf_text
-        prompt += f"\n\nCONTEXT (for reference):\n{simplified_pdf}"
+        # Add full PDF context without truncation
+        prompt += f"\n\nCONTEXT (for reference):\n{pdf_text}"
         
         if batch_attempt == 0:
             print(f"[DEBUG] Making batch request for all clue types for answer '{answer}' on page {page_index+1}")
@@ -925,6 +1019,29 @@ tk.Button(
     bg="#444",
     fg="white"
 ).pack(pady=1)
+
+# Review Answers Checkbox
+review_frame = tk.Frame(root, bg="#2e2e2e")
+review_frame.pack(pady=2, padx=10, fill=tk.X)
+review_answers_var = tk.BooleanVar(value=review_answers_enabled)
+review_checkbox = tk.Checkbutton(
+    review_frame,
+    text="Review answers before generating clues",
+    variable=review_answers_var,
+    command=lambda: update_review_setting(),
+    bg="#2e2e2e",
+    fg="white",
+    selectcolor="#444",
+    activebackground="#2e2e2e",
+    activeforeground="white"
+)
+review_checkbox.pack(pady=1)
+
+# Function to update the global review setting
+def update_review_setting():
+    global review_answers_enabled
+    review_answers_enabled = review_answers_var.get()
+    print(f"[DEBUG] Review answers setting: {review_answers_enabled}")
 
 # Output Notebook (For displaying rows for each page)
 output_frame = tk.Frame(root, bg="#2e2e2e")
