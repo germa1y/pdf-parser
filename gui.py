@@ -631,7 +631,7 @@ def get_next_clue_type(page_index=0):
         page_clue_types[page_index] = shuffled
     return page_clue_types[page_index].pop(0)
 
-def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
+def process_clue_for_answer(answer, page_index=0, specified_clue_type=None, max_attempts=3):
     """
     Builds a prompt to generate clues for the given answer using ALL available CLUETYPES
     or a specified ClueType if provided, then sends a single API call to get all responses.
@@ -639,6 +639,7 @@ def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
     ClueType 'Acrostic' is only allowed if the answer (excluding spaces) has 10 or fewer letters.
     Enhanced to prevent answers from appearing in generated clues.
     Now with detailed debugging for batch processing.
+    Automatically resubmits clues that contain the answer word.
     """
     answer_length = len(answer.replace(" ", ""))
     pdf_text = pdf_pages[page_index] if pdf_pages and len(pdf_pages) > page_index else "Cached PDF Context"
@@ -660,40 +661,59 @@ def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
         if specified_clue_type == "Acrostic" and answer_length > 10:
             print(f"[WARNING] Acrostic not suitable for answer '{answer}' (too long). Skipping.")
             return False
+           
+        # Try to generate a valid clue up to max_attempts times 
+        for attempt in range(max_attempts):
+            # Process single clue type with existing method
+            clue_type_desc = CLUE_TYPE_DESC.get(specified_clue_type, "")
+            prompt = (
+                f"PDF Content:\n{pdf_text}\n\n"
+                f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{specified_clue_type}', '{clue_type_desc}'. "
+                "IMPORTANT: Your clue MUST NOT contain the answer itself or directly reveal it. "
+                f"The clue should challenge the user to figure out the answer without explicitly mentioning it or any part of '{answer}'. "
+                "Respond with a single line containing only the clue text. Do not include any labels or explanation."
+            )
             
-        # Process single clue type with existing method
-        clue_type_desc = CLUE_TYPE_DESC.get(specified_clue_type, "")
-        prompt = (
-            f"PDF Content:\n{pdf_text}\n\n"
-            f"Generate a detailed and engaging clue for the answer '{answer}' using clue type '{specified_clue_type}', '{clue_type_desc}'. "
-            "IMPORTANT: Your clue MUST NOT contain the answer itself or directly reveal it. "
-            "The clue should challenge the user to figure out the answer without explicitly mentioning it. "
-            "Respond with a single line containing only the clue text. Do not include any labels or explanation."
-        )
-        
-        # Add special instructions for problematic clue types
-        if specified_clue_type == "Rebus":
-            prompt += " For this Rebus clue, do not include '= [ANSWER]' or any equation that shows the answer. Only provide the symbols/emojis."
+            # Add special instructions for problematic clue types
+            if specified_clue_type == "Rebus":
+                prompt += " For this Rebus clue, do not include '= [ANSWER]' or any equation that shows the answer. Only provide the symbols/emojis."
 
-        print(f"[DEBUG] Prompt for answer '{answer}' with clue type '{specified_clue_type}' on page {page_index+1}")
-        
-        api_result = send_prompt(prompt, clue_model_dropdown)
-        if api_result:
-            # Clean up the response
-            if api_result.lower().startswith("clue:"):
-                api_result = api_result[len("clue:"):].strip()
-            api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
+            if attempt > 0:
+                print(f"[DEBUG] Retry attempt #{attempt+1} for answer '{answer}' with clue type '{specified_clue_type}' on page {page_index+1}")
+            else:
+                print(f"[DEBUG] Prompt for answer '{answer}' with clue type '{specified_clue_type}' on page {page_index+1}")
             
-            # Check if answer is in clue
-            if answer.lower() in api_result.lower():
-                api_result = f"[NEEDS REVIEW - Answer may be revealed] {api_result}"
+            api_result = send_prompt(prompt, clue_model_dropdown)
+            if api_result:
+                # Clean up the response
+                if api_result.lower().startswith("clue:"):
+                    api_result = api_result[len("clue:"):].strip()
+                api_result = " ".join(api_result.splitlines()).replace("**", "").replace('"', "").strip()
                 
-            # Insert into tree
-            tree.insert("", "end", values=(section_title.get(page_index, ""), 
-                                          section_number.get(page_index, ""), 
-                                          page_number.get(page_index, ""), 
-                                          specified_clue_type, api_result, answer))
-        return True
+                # Check if answer is in clue
+                if answer.lower() in api_result.lower():
+                    if attempt < max_attempts - 1:
+                        print(f"[DEBUG] Answer found in clue, retrying (attempt {attempt+1}/{max_attempts})")
+                        continue
+                    else:
+                        print(f"[WARNING] Failed to generate valid clue after {max_attempts} attempts, using best effort")
+                
+                # Insert into tree
+                tree.insert("", "end", values=(section_title.get(page_index, ""), 
+                                            section_number.get(page_index, ""), 
+                                            page_number.get(page_index, ""), 
+                                            specified_clue_type, api_result, answer))
+                return True
+            
+            # If API call failed, try again
+            if attempt < max_attempts - 1:
+                print(f"[WARNING] API call failed, retrying (attempt {attempt+1}/{max_attempts})")
+            else:
+                print(f"[ERROR] Failed to generate clue after {max_attempts} attempts")
+                return False
+                
+        # If we get here, all attempts failed
+        return False
     
     # For all clue types, make a single batched API call
     # Filter out Acrostic if answer is too long
@@ -708,90 +728,128 @@ def process_clue_for_answer(answer, page_index=0, specified_clue_type=None):
     
     all_clue_types_text = "\n\n".join(clue_type_requests)
     
-    # Create a simpler prompt for better batch processing
-    prompt = (
-        f"ANSWER: '{answer}'\n\n"
-        f"TASK: Generate one unique clue for each of the following clue types:\n\n"
-        f"{all_clue_types_text}\n\n"
-        "FORMAT REQUIREMENTS:\n"
-        "1. Format each clue as: '[ClueType] Clue text'\n"
-        "2. Respond with a numbered list, one clue per line\n"
-        "3. Be concise - clues should be under 15 words each\n"
-        "4. Do NOT include the answer word in any clue\n\n"
-        "EXAMPLE RESPONSE FORMAT:\n"
-        "1. [Definition] Brief definition clue here\n"
-        "2. [Synonym] Brief synonym clue here\n"
-        "And so on for each clue type."
-    )
+    # Track which clue types need to be resubmitted
+    clue_types_needing_resubmission = set()
     
-    # Add truncated PDF context at the end to avoid overweighting it
-    simplified_pdf = pdf_text[:300] + "..." if len(pdf_text) > 300 else pdf_text
-    prompt += f"\n\nCONTEXT (for reference):\n{simplified_pdf}"
-    
-    print(f"[DEBUG] Making batch request for all clue types for answer '{answer}' on page {page_index+1}")
-    print(f"[DEBUG] Prompt length: {len(prompt)} characters")
-    
-    # Make a single API call for all clue types without token limitation
-    api_result = send_prompt(prompt, clue_model_dropdown)
-    
-    # Check if we got a valid response
-    if api_result and len(api_result.strip()) > 0:
-        print(f"[DEBUG] Received batch response of {len(api_result)} characters")
-        # Parse the results to extract individual clues
-        # Expected format: "[ClueType] Clue text" or "1. [ClueType] Clue text"
-        clue_lines = api_result.strip().split('\n')
-        print(f"[DEBUG] Response contains {len(clue_lines)} lines")
-        
-        clues_processed = 0
-        for line in clue_lines:
-            # Skip empty lines
-            if not line.strip():
-                continue
+    # Make up to max_attempts batch requests
+    for batch_attempt in range(max_attempts):
+        if batch_attempt > 0:
+            # If this is a retry, only request the problematic clue types
+            if not clue_types_needing_resubmission:
+                break
                 
-            print(f"[DEBUG] Processing line: {line[:50]}..." if len(line) > 50 else f"[DEBUG] Processing line: {line}")
-                
-            # Remove numbering if present (e.g., "1. [ClueType] Clue text")
-            if re.match(r'^\d+\.', line):
-                line = re.sub(r'^\d+\.\s*', '', line)
+            clue_type_requests = []
+            for clue_type in clue_types_needing_resubmission:
+                clue_type_desc = CLUE_TYPE_DESC.get(clue_type, "")
+                clue_type_requests.append(f"Clue Type: {clue_type}\nDescription: {clue_type_desc}")
             
-            # Extract clue type and text using regex
-            match = re.match(r'\[([^\]]+)\](.*)', line)
-            if match:
-                clue_type = match.group(1).strip()
-                clue_text = match.group(2).strip()
-                
-                print(f"[DEBUG] Extracted clue type: '{clue_type}', clue text: '{clue_text[:30]}...'")
-                
-                # Verify clue type is valid
-                if clue_type in CLUE_TYPES:
-                    clues_processed += 1
-                    # Check if answer is in clue
-                    if answer.lower() in clue_text.lower():
-                        clue_text = f"[NEEDS REVIEW - Answer may be revealed] {clue_text}"
-                    
-                    # Insert into tree
-                    tree.insert("", "end", values=(section_title.get(page_index, ""), 
-                                                  section_number.get(page_index, ""), 
-                                                  page_number.get(page_index, ""), 
-                                                  clue_type, clue_text, answer))
-                else:
-                    print(f"[WARNING] Invalid clue type '{clue_type}' in response for answer '{answer}'")
-            else:
-                print(f"[WARNING] Could not parse line: '{line}'")
+            all_clue_types_text = "\n\n".join(clue_type_requests)
+            print(f"[DEBUG] Retry batch attempt #{batch_attempt+1} for {len(clue_types_needing_resubmission)} clue types")
         
-        # If we successfully processed clues, return
-        if clues_processed > 0:
-            print(f"[DEBUG] Successfully processed {clues_processed} clues for answer '{answer}' in batch mode")
-            return True
+        # Create a simpler prompt for better batch processing
+        prompt = (
+            f"ANSWER: '{answer}'\n\n"
+            f"TASK: Generate one unique clue for each of the following clue types:\n\n"
+            f"{all_clue_types_text}\n\n"
+            "FORMAT REQUIREMENTS:\n"
+            "1. Format each clue as: '[ClueType] Clue text'\n"
+            "2. Respond with a numbered list, one clue per line\n"
+            "3. Be concise - clues should be under 15 words each\n"
+            f"4. IMPORTANT: Do NOT include the answer word '{answer}' or any variation of it in any clue\n\n"
+            "EXAMPLE RESPONSE FORMAT:\n"
+            "1. [Definition] Brief definition clue here\n"
+            "2. [Synonym] Brief synonym clue here\n"
+            "And so on for each clue type."
+        )
+        
+        # Add truncated PDF context at the end to avoid overweighting it
+        simplified_pdf = pdf_text[:300] + "..." if len(pdf_text) > 300 else pdf_text
+        prompt += f"\n\nCONTEXT (for reference):\n{simplified_pdf}"
+        
+        if batch_attempt == 0:
+            print(f"[DEBUG] Making batch request for all clue types for answer '{answer}' on page {page_index+1}")
         else:
-            print(f"[ERROR] Batch API call succeeded but no valid clues found. Response format may be incorrect.")
-            # Print the first part of the API response for debugging
-            print(f"[DEBUG] First 300 chars of response: {api_result[:300]}...")
-            return False
-    else:
-        # Detailed error information when batch fails
-        print(f"[ERROR] Batch API call failed for answer '{answer}'. No response received.")
-        return False
+            print(f"[DEBUG] Making retry batch request for {len(clue_types_needing_resubmission)} clue types for answer '{answer}'")
+        print(f"[DEBUG] Prompt length: {len(prompt)} characters")
+        
+        # Make a single API call for all clue types without token limitation
+        api_result = send_prompt(prompt, clue_model_dropdown)
+        
+        # Reset the resubmission set for this attempt
+        clue_types_needing_resubmission = set()
+        
+        # Check if we got a valid response
+        if api_result and len(api_result.strip()) > 0:
+            print(f"[DEBUG] Received batch response of {len(api_result)} characters")
+            # Parse the results to extract individual clues
+            # Expected format: "[ClueType] Clue text" or "1. [ClueType] Clue text"
+            clue_lines = api_result.strip().split('\n')
+            print(f"[DEBUG] Response contains {len(clue_lines)} lines")
+            
+            clues_processed = 0
+            for line in clue_lines:
+                # Skip empty lines
+                if not line.strip():
+                    continue
+                    
+                print(f"[DEBUG] Processing line: {line[:50]}..." if len(line) > 50 else f"[DEBUG] Processing line: {line}")
+                    
+                # Remove numbering if present (e.g., "1. [ClueType] Clue text")
+                if re.match(r'^\d+\.', line):
+                    line = re.sub(r'^\d+\.\s*', '', line)
+                
+                # Extract clue type and text using regex
+                match = re.match(r'\[([^\]]+)\](.*)', line)
+                if match:
+                    clue_type = match.group(1).strip()
+                    clue_text = match.group(2).strip()
+                    
+                    print(f"[DEBUG] Extracted clue type: '{clue_type}', clue text: '{clue_text[:30]}...'")
+                    
+                    # Verify clue type is valid
+                    if clue_type in CLUE_TYPES:
+                        # Check if answer is in clue
+                        if answer.lower() in clue_text.lower():
+                            # If this is not the final attempt, add to resubmission list
+                            if batch_attempt < max_attempts - 1:
+                                print(f"[DEBUG] Answer found in '{clue_type}' clue, will retry")
+                                clue_types_needing_resubmission.add(clue_type)
+                                continue
+                            else:
+                                print(f"[WARNING] Failed to generate valid clue after {max_attempts} attempts, using best effort")
+                        
+                        clues_processed += 1
+                        # Insert into tree
+                        tree.insert("", "end", values=(section_title.get(page_index, ""), 
+                                                    section_number.get(page_index, ""), 
+                                                    page_number.get(page_index, ""), 
+                                                    clue_type, clue_text, answer))
+                    else:
+                        print(f"[WARNING] Invalid clue type '{clue_type}' in response for answer '{answer}'")
+                else:
+                    print(f"[WARNING] Could not parse line: '{line}'")
+            
+            # If we have some clues needing resubmission but also processed some valid ones
+            if clues_processed > 0:
+                if not clue_types_needing_resubmission or batch_attempt == max_attempts - 1:
+                    print(f"[DEBUG] Successfully processed {clues_processed} clues for answer '{answer}' in batch mode")
+                    return True
+            else:
+                print(f"[ERROR] Batch API call succeeded but no valid clues found. Response format may be incorrect.")
+                # Print the first part of the API response for debugging
+                print(f"[DEBUG] First 300 chars of response: {api_result[:300]}...")
+                return False
+        else:
+            # If batch API call failed completely and this is the last attempt
+            if batch_attempt == max_attempts - 1:
+                print(f"[ERROR] Batch API call failed for answer '{answer}' after {max_attempts} attempts. No response received.")
+                return False
+    
+    # If we get here and still have clue types needing resubmission
+    if clue_types_needing_resubmission:
+        print(f"[WARNING] Could not generate valid clues for {len(clue_types_needing_resubmission)} clue types after {max_attempts} attempts")
+    
+    return True
 
 # ------------------------ BUILD THE GUI ------------------------
 root = tk.Tk()
